@@ -9,6 +9,7 @@ use crate::boundary_assemblers::cell_pair_assemblers::{
 use crate::boundary_assemblers::helpers::KernelEvaluator;
 use crate::boundary_assemblers::helpers::{equal_grids, RawData2D, RlstArray, SparseMatrixData};
 use crate::function::{FunctionSpaceTrait, LocalFunctionSpaceTrait};
+use bempp_distributed_tools::index_layout;
 use bempp_quadrature::duffy::{
     quadrilateral_duffy, quadrilateral_triangle_duffy, triangle_duffy, triangle_quadrilateral_duffy,
 };
@@ -16,7 +17,7 @@ use bempp_quadrature::types::{CellToCellConnectivity, TestTrialNumericalQuadratu
 use green_kernels::traits::Kernel;
 use integrands::BoundaryIntegrand;
 use itertools::izip;
-use mpi::traits::Communicator;
+use mpi::traits::{Communicator, Equivalence};
 use ndelement::quadrature::simplex_rule;
 use ndelement::reference_cell;
 use ndelement::traits::FiniteElement;
@@ -25,8 +26,9 @@ use ndgrid::traits::{Entity, Grid, Topology};
 use ndgrid::types::Ownership;
 use rayon::prelude::*;
 use rlst::{
-    rlst_dynamic_array2, rlst_dynamic_array4, CsrMatrix, DefaultIterator, DynamicArray,
-    MatrixInverse, RandomAccessMut, RawAccess, RawAccessMut, RlstScalar, Shape,
+    rlst_dynamic_array2, rlst_dynamic_array4, CsrMatrix, DefaultIterator, DistributedCsrMatrix,
+    DynamicArray, IndexLayout, MatrixInverse, RandomAccessMut, RawAccess, RawAccessMut, RlstScalar,
+    Shape,
 };
 use std::collections::HashMap;
 
@@ -120,43 +122,46 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
     BoundaryAssembler<'o, T, Integrand, K>
 {
     /// Assemble the singular part into a CSR matrix.
-    pub fn assemble_singular<Space: FunctionSpaceTrait<T = T>>(
+    pub fn assemble_singular<
+        'a,
+        C: Communicator,
+        TrialLayout: IndexLayout<Comm = C>,
+        TestLayout: IndexLayout<Comm = C>,
+        Space: FunctionSpaceTrait<T = T>,
+    >(
         &self,
         trial_space: &Space,
+        trial_index_layout: &'a TrialLayout,
         test_space: &Space,
-    ) -> CsrMatrix<T>
+        test_index_layout: &'a TestLayout,
+    ) -> DistributedCsrMatrix<'a, TrialLayout, TestLayout, T, C>
     where
         Space::LocalFunctionSpace: Sync,
+        T: Equivalence,
     {
+        assert_eq!(
+            trial_space.global_size(),
+            trial_index_layout.number_of_global_indices()
+        );
+
+        assert_eq!(
+            test_space.global_size(),
+            test_index_layout.number_of_global_indices()
+        );
+
         let shape = [test_space.global_size(), trial_space.global_size()];
         let sparse_matrix =
             self.assemble_singular_part(shape, trial_space.local_space(), test_space.local_space());
 
-        if sparse_matrix.data.is_empty()
-            || sparse_matrix
-                .data
-                .iter()
-                .map(|i| i.abs())
-                .filter(|i| *i > T::from(1e-10).unwrap().re())
-                .count()
-                == 0
-        {
-            // TODO: remove this hack once https://github.com/linalg-rs/rlst/pull/100 is merged and there a new release of RLST
-            CsrMatrix::<T>::new(
-                sparse_matrix.shape,
-                vec![],
-                vec![0; sparse_matrix.shape[0] + 1],
-                vec![],
-            )
-        } else {
-            CsrMatrix::<T>::from_aij(
-                sparse_matrix.shape,
-                &sparse_matrix.rows,
-                &sparse_matrix.cols,
-                &sparse_matrix.data,
-            )
-            .unwrap()
-        }
+        // Instantiate the CSR matrix.
+
+        DistributedCsrMatrix::from_aij(
+            trial_index_layout,
+            test_index_layout,
+            &sparse_matrix.rows,
+            &sparse_matrix.cols,
+            &sparse_matrix.data,
+        )
     }
 
     /// Assemble into a dense matrix.
