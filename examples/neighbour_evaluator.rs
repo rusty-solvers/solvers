@@ -26,7 +26,7 @@ fn main() {
     let mut points = rlst_dynamic_array2!(f64, [2, n_points]);
     points.fill_from_equally_distributed(&mut rng);
 
-    let grid = bempp::shapes::regular_sphere::<f64, _>(100, 1, &world);
+    let grid = bempp::shapes::regular_sphere::<f64, _>(3, 1, &world);
 
     // Now get the active cells on the current process.
 
@@ -51,11 +51,10 @@ fn main() {
     // Create an element in the space.
 
     let mut x = space.zero();
-    let mut y = space.zero();
 
     x.view_mut()
         .local_mut()
         .fill_from_equally_distributed(&mut rng);
 
-    let res = evaluator.apply(&x);
+    let _res = evaluator.apply(&x);
 }

@@ -258,31 +258,18 @@ impl<
         // We now need to setup the ghost communicator structure. When cells are target that interface process
         // boundaries, there sources are on another process, hence need ghost communicators to get the data.
 
-        // This struct stores the relevant indices of the ghost cells.
-        #[derive(Clone, Copy)]
-        struct GhostIndices {
-            // The local index of the ghost cell on the current rank.
-            local_index: usize,
-            // The local index of the ghost cell on the owning rank.
-            owning_local_index: usize,
-        };
-        let mut global_index_to_ghost = HashMap::<usize, GhostIndices>::default();
+        // This map stores the local index associated with a global index.
+        let mut global_index_to_local = HashMap::<usize, usize>::default();
 
         // We iterate through the cells to figure out ghost cells and their originating ranks.
         let mut ghost_global_indices: Vec<usize> = Vec::new();
         let mut ghost_ranks: Vec<usize> = Vec::new();
 
         for cell in grid.entity_iter(tdim) {
-            if let Ownership::Ghost(owning_rank, owning_local_index) = cell.ownership() {
+            if let Ownership::Ghost(owning_rank, _) = cell.ownership() {
                 ghost_global_indices.push(cell.global_index());
                 ghost_ranks.push(owning_rank);
-                global_index_to_ghost.insert(
-                    cell.global_index(),
-                    GhostIndices {
-                        local_index: cell.local_index(),
-                        owning_local_index,
-                    },
-                );
+                global_index_to_local.insert(cell.global_index(), cell.local_index());
             }
         }
 
@@ -301,7 +288,7 @@ impl<
         let receive_local_indices = ghost_communicator
             .receive_indices()
             .iter()
-            .map(|global_index| global_index_to_ghost[global_index].local_index)
+            .map(|global_index| global_index_to_local[global_index])
             .collect_vec();
 
         Self {
@@ -514,9 +501,20 @@ where
                 geometry_map.points(active_cell_index, target_points.data_mut());
 
                 // Get all the neighbouring celll indices.
+                // This is a bit cumbersome. We go through the points of the target cell and add all cells that are connected
+                // to each point, using a `unique` iterator to remove duplicates.
                 let mut source_cells = cell_entity
                     .topology()
-                    .connected_entity_iter(tdim)
+                    .sub_entity_iter(0)
+                    .flat_map(|v| {
+                        local_grid
+                            .entity(0, v)
+                            .unwrap()
+                            .topology()
+                            .connected_entity_iter(tdim)
+                            .collect_vec()
+                    })
+                    .unique()
                     .collect_vec();
                 // We add the target cell itself to get the self interactions.
                 source_cells.push(active_cell_index);
