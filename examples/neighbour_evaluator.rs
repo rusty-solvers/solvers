@@ -42,6 +42,7 @@ fn main() {
     let evaluator = NeighbourEvaluator::new(
         points.data(),
         Laplace3dKernel::default(),
+        green_kernels::types::GreenKernelEvalType::Value,
         &space,
         &space,
         &grid,

@@ -1,10 +1,8 @@
 //! Various helper functions to support evaluators.
 
-use std::{
-    marker::PhantomData,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, marker::PhantomData};
 
+use bempp_distributed_tools::GhostCommunicator;
 use green_kernels::{traits::Kernel, types::GreenKernelEvalType};
 use itertools::{izip, Itertools};
 use mpi::traits::{Communicator, Equivalence};
@@ -14,14 +12,15 @@ use ndgrid::{
     types::Ownership,
 };
 
-use rayon::{prelude::*, range};
+use rayon::prelude::*;
 use rlst::{
     operator::interface::{
         distributed_sparse_operator::DistributedCsrMatrixOperator, DistributedArrayVectorSpace,
     },
     rlst_array_from_slice2, rlst_dynamic_array1, rlst_dynamic_array2, rlst_dynamic_array3,
-    rlst_dynamic_array4, AsApply, DefaultIterator, DistributedCsrMatrix, Element, IndexLayout,
-    OperatorBase, RawAccess, RawAccessMut, RlstScalar,
+    rlst_dynamic_array4, Array, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
+    Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar, Shape,
+    UnsafeRandomAccessByValue, UnsafeRandomAccessMut,
 };
 
 use crate::function::FunctionSpaceTrait;
@@ -174,119 +173,7 @@ where
     }
 }
 
-/// A linear operator that evaluates kernel interactions for a nonsingular quadrature rule on neighbouring elements.
-pub fn neighbour_operator<
-    'a,
-    C: Communicator,
-    T: RlstScalar + Equivalence,
-    K: Kernel<T = T>,
-    DomainLayout: IndexLayout<Comm = C>,
-    RangeLayout: IndexLayout<Comm = C>,
-    GridImpl: ParallelGrid<C, T = T::Real>,
->(
-    grid: &'a GridImpl,
-    kernel: K,
-    eval_type: GreenKernelEvalType,
-    eval_points: &[T::Real],
-    domain_space: &'a DistributedArrayVectorSpace<'a, DomainLayout, T>,
-    range_space: &'a DistributedArrayVectorSpace<'a, RangeLayout, T>,
-) where
-    GridImpl::LocalGrid: Sync,
-    for<'b> <GridImpl::LocalGrid as Grid>::GeometryMap<'b>: Sync,
-{
-    // Check that the domain space and range space are compatible with the grid.
-    // Topological dimension of the grid.
-    let tdim = grid.topology_dim();
-
-    // Also need the geometric dimension.
-    let gdim = grid.geometry_dim();
-
-    // The method is currently restricted to single element type grids.
-    // So let's make sure that this is the case.
-
-    assert_eq!(grid.entity_types(tdim).len(), 1);
-
-    let reference_cell = grid.entity_types(tdim)[0];
-
-    // Get the number of points
-    assert_eq!(eval_points.len() % tdim, 0);
-    let n_points = eval_points.len() / tdim;
-
-    // The active cells are those that we need to iterate over.
-    // At the moment these are simply all owned cells in the grid.
-    // We sort the active cells by global index. This is important so that in the evaluation
-    // we can just iterate the output vector through in chunks and know from the chunk which
-    // active cell it is associated with.
-
-    let active_cells: Vec<usize> = grid
-        .entity_iter(tdim)
-        .filter(|e| matches!(e.ownership(), Ownership::Owned))
-        .sorted_by_key(|e| e.global_index())
-        .map(|e| e.local_index())
-        .collect_vec();
-
-    let n_cells = active_cells.len();
-
-    // Check that domain space and function space are compatible with the grid.
-
-    assert_eq!(
-        domain_space.index_layout().number_of_local_indices(),
-        n_cells * n_points
-    );
-
-    assert_eq!(
-        range_space.index_layout().number_of_local_indices(),
-        n_cells * n_points
-    );
-
-    // We need to figure out how many data entries the sparse matrix will have.
-    // For this we need to iterate through all cells and figure out how many neighbours
-    // each cell has.
-
-    let mut entries = 0;
-    for &cell in &active_cells {
-        let n_neighbours = grid
-            .entity(tdim, cell)
-            .unwrap()
-            .topology()
-            .connected_entity_iter(tdim)
-            .count();
-        // For each cell have (1 + nneighbours) * n_points * n_points interactions.
-        // The + comes from the fact that we also need to consider self interactions for each cell.
-        entries += (1 + n_neighbours) * n_points * n_points;
-    }
-
-    // Now initiate the aij arrays for the sparse matrix.
-
-    let rows = Arc::new(Mutex::new(Vec::<usize>::with_capacity(entries)));
-    let cols = Arc::new(Mutex::new(Vec::<usize>::with_capacity(entries)));
-    let data = Arc::new(Mutex::new(Vec::<T>::with_capacity(entries)));
-
-    let local_grid = grid.local_grid();
-    let geometry_map = local_grid.geometry_map(reference_cell, eval_points);
-
-    // We now use a parallel iterator to go through each cell and evaluate the interactions.
-    active_cells.par_iter().for_each(|&cell| {
-        let cell_entity = local_grid.entity(tdim, cell).unwrap();
-        let cell_global_index = cell_entity.global_index();
-        let mut target_points = rlst_dynamic_array2!(T::Real, [gdim, n_points]);
-        geometry_map.points(cell, target_points.data_mut());
-        // We also need the corresponding indices.
-        let target_indices =
-            (n_points * cell_global_index..n_points * (1 + cell_global_index)).collect_vec();
-        // Let's get the neighbouring cells. These are the sources.
-        let mut source_cells = cell_entity
-            .topology()
-            .connected_entity_iter(tdim)
-            .collect_vec();
-        // We push the cell itself for the self interactions.
-        source_cells.push(cell);
-        // The following matrix is going to hold the result of the kernel calculation.
-        let mut kernel_matrix = rlst_dynamic_array2!(T, [n_points, source_cells.len() * n_points]);
-        // We also want the global indices of the source points.
-    })
-}
-
+/// Create a linear operator from the map of a basis to points.
 pub struct NeighbourEvaluator<
     'a,
     T: RlstScalar + Equivalence,
@@ -297,11 +184,15 @@ pub struct NeighbourEvaluator<
     C: Communicator,
 > {
     eval_points: Vec<T::Real>,
+    n_points: usize,
     kernel: K,
+    eval_type: GreenKernelEvalType,
     domain_space: &'a DistributedArrayVectorSpace<'a, DomainLayout, T>,
     range_space: &'a DistributedArrayVectorSpace<'a, RangeLayout, T>,
     grid: &'a GridImpl,
     active_cells: Vec<usize>,
+    ghost_communicator: GhostCommunicator<usize>,
+    receive_local_indices: Vec<usize>,
     _marker: PhantomData<C>,
 }
 
@@ -319,6 +210,7 @@ impl<
     pub fn new(
         eval_points: &[T::Real],
         kernel: K,
+        eval_type: GreenKernelEvalType,
         domain_space: &'a DistributedArrayVectorSpace<'a, DomainLayout, T>,
         range_space: &'a DistributedArrayVectorSpace<'a, RangeLayout, T>,
         grid: &'a GridImpl,
@@ -360,17 +252,149 @@ impl<
 
         assert_eq!(
             range_space.index_layout().number_of_local_indices(),
-            n_cells * n_points
+            n_cells * n_points * kernel.range_component_count(eval_type)
         );
+
+        // We now need to setup the ghost communicator structure. When cells are target that interface process
+        // boundaries, there sources are on another process, hence need ghost communicators to get the data.
+
+        // This struct stores the relevant indices of the ghost cells.
+        #[derive(Clone, Copy)]
+        struct GhostIndices {
+            // The local index of the ghost cell on the current rank.
+            local_index: usize,
+            // The local index of the ghost cell on the owning rank.
+            owning_local_index: usize,
+        };
+        let mut global_index_to_ghost = HashMap::<usize, GhostIndices>::default();
+
+        // We iterate through the cells to figure out ghost cells and their originating ranks.
+        let mut ghost_global_indices: Vec<usize> = Vec::new();
+        let mut ghost_ranks: Vec<usize> = Vec::new();
+
+        for cell in grid.entity_iter(tdim) {
+            if let Ownership::Ghost(owning_rank, owning_local_index) = cell.ownership() {
+                ghost_global_indices.push(cell.global_index());
+                ghost_ranks.push(owning_rank);
+                global_index_to_ghost.insert(
+                    cell.global_index(),
+                    GhostIndices {
+                        local_index: cell.local_index(),
+                        owning_local_index,
+                    },
+                );
+            }
+        }
+
+        // We now setup the ghost communicator. The chunk sizes is `n_points` per triangle.
+
+        let ghost_communicator = GhostCommunicator::new(
+            // This is the actual global ghost indices.
+            &ghost_global_indices,
+            &ghost_ranks,
+            domain_space.index_layout().comm(),
+        );
+
+        // We now need to get the local indices of the receive values too. The ghost communicator
+        // only stores global indices.
+
+        let receive_local_indices = ghost_communicator
+            .receive_indices()
+            .iter()
+            .map(|global_index| global_index_to_ghost[global_index].local_index)
+            .collect_vec();
 
         Self {
             eval_points: eval_points.to_vec(),
+            n_points,
             kernel,
+            eval_type,
             domain_space,
             range_space,
             grid,
             active_cells,
+            ghost_communicator,
+            receive_local_indices,
             _marker: PhantomData,
+        }
+    }
+
+    fn communicate_dofs<
+        ArrayImpl: UnsafeRandomAccessByValue<1, Item = T>
+            + Shape<1>
+            + UnsafeRandomAccessMut<1, Item = T>
+            + RawAccessMut<Item = T>,
+    >(
+        &self,
+        x: &DistributedVector<'_, DomainLayout, T>,
+        mut out: Array<T, ArrayImpl, 1>,
+    ) {
+        let tdim = self.grid.topology_dim();
+        let reference_cell = self.grid.entity_types(tdim)[0];
+        // Check that `out` has the correct size. It must be n_points * the number of cells in the grid.
+        assert_eq!(
+            out.shape()[0],
+            self.grid.entity_count(reference_cell) * self.n_points
+        );
+
+        let rank = self.domain_space.index_layout().comm().rank() as usize;
+        // We first setup the send data.
+
+        let mut send_data =
+            vec![T::zero(); self.ghost_communicator.total_send_count() * self.n_points];
+
+        // We now need to fill the send data with the values of the local dofs.
+
+        for (send_chunk, &send_global_index) in izip!(
+            send_data.chunks_mut(self.n_points),
+            self.ghost_communicator.send_indices().iter()
+        ) {
+            let local_start_index = self
+                .domain_space
+                .index_layout()
+                .global2local(rank, send_global_index * self.n_points)
+                .unwrap();
+            let local_end_index = local_start_index + self.n_points;
+            send_chunk.copy_from_slice(&x.local().r().data()[local_start_index..local_end_index]);
+        }
+
+        // We need an array for the receive data.
+
+        let mut receive_data =
+            vec![T::zero(); self.ghost_communicator.total_receive_count() * self.n_points];
+
+        // Now we need to communicate the data.
+
+        self.ghost_communicator.forward_send_values_by_chunks(
+            send_data.as_slice(),
+            &mut receive_data,
+            self.n_points,
+        );
+
+        // We have done the ghost exchange. Now we build the local vector of dofs. Each chunk of n_points corresponds
+        // to one local index.
+
+        for (receive_chunk, &receive_local_index) in izip!(
+            receive_data.chunks(self.n_points),
+            self.receive_local_indices.iter(),
+        ) {
+            let local_start_index = receive_local_index * self.n_points;
+            let local_end_index = local_start_index + self.n_points;
+            out.data_mut()[local_start_index..local_end_index].copy_from_slice(receive_chunk);
+        }
+
+        // After filling the ghost data we need to fill the local data in the right cell order.
+        // We go through the cells, get the global index of the cell, multiply it with `n_points` and
+        // use that as global start index for the data in x.
+
+        for &cell in self.active_cells.iter() {
+            let cell_entity = self.grid.entity(tdim, cell).unwrap();
+            let x_start = x
+                .index_layout()
+                .global2local(rank, cell_entity.global_index() * self.n_points)
+                .unwrap();
+            let x_end = x_start + self.n_points;
+            out.data_mut()[x_start..x_end].copy_from_slice(&x.local().data()[x_start..x_end]);
         }
     }
 }
@@ -417,44 +441,6 @@ impl<
     }
 }
 
-// struct SyncedGridRef<
-//     'a,
-//     C: Communicator,
-//     T: RlstScalar + Equivalence,
-//     GridImpl: ParallelGrid<C, T = T::Real>,
-// > {
-//     grid: &'a GridImpl::LocalGrid,
-//     _marker: PhantomData<C>,
-//     _marker2: PhantomData<T>,
-// }
-
-// unsafe impl<'a, C: Communicator, T: RlstScalar + Equivalence, GridImpl: ParallelGrid<C, T = T::Real>>
-//     Sync for SyncedGridRef<'a, C, T, GridImpl>
-// {
-// }
-
-// impl<'a, C: Communicator, T: RlstScalar + Equivalence, GridImpl: ParallelGrid<C, T = T::Real>>
-//     SyncedGridRef<'a, C, T, GridImpl>
-// {
-//     fn new(grid: &'a GridImpl::LocalGrid) -> Self {
-//         Self {
-//             grid,
-//             _marker: PhantomData,
-//             _marker2: PhantomData,
-//         }
-//     }
-// }
-
-// impl<'a, C: Communicator, T: RlstScalar + Equivalence, GridImpl: ParallelGrid<C, T = T::Real>>
-//     std::ops::Deref for SyncedGridRef<'a, C, T, GridImpl>
-// {
-//     type Target = GridImpl::LocalGrid;
-
-//     fn deref(&self) -> &Self::Target {
-//         self.grid
-//     }
-// }
-
 impl<
         T: RlstScalar + Equivalence,
         K: Kernel<T = T>,
@@ -479,11 +465,30 @@ where
         let tdim = self.grid.topology_dim();
         let gdim = self.grid.geometry_dim();
 
+        // We need the chunk size of the targets. This is the chunk size of the domain multiplied
+        // with the range component count of the kernel.
+        let target_chunk_size = self.n_points * self.kernel.range_component_count(self.eval_type);
+
         // In the new function we already made sure that eval_points is a multiple of tdim.
-        let n_points = self.eval_points.len() / tdim;
+        let n_points = self.n_points;
 
         // We need the reference cell
         let reference_cell = self.grid.entity_types(tdim)[0];
+
+        // Let's get the number of cells on this rank. This includes local and ghost cells.
+        // This is different from `n_cells` in `new` which only counts owned cells.
+        let n_cells = self.grid.entity_count(reference_cell);
+
+        // Let us allocate space for the local charges. Each chunk of charges is associated with a cell.
+        let mut charges = rlst_dynamic_array1![T, [n_cells * n_points]];
+
+        // We now need to communicate the data.
+
+        self.communicate_dofs(x.view(), charges.r_mut());
+
+        // The `charges` vector now has all the charges for each cell on our process, including ghost cells.
+        // Next we iterate through the targets from the active cells and evaluate the kernel with sources coming
+        // from the neighbouring cells and the self interactions.
 
         // We go through groups of target dofs in chunks of lenth n_points.
         // This corresponds to iteration in active cells since we ordered those
@@ -493,24 +498,57 @@ where
         let active_cells = self.active_cells.as_slice();
         let eval_points = self.eval_points.as_slice();
         let geometry_map = local_grid.geometry_map(reference_cell, eval_points);
+        let kernel = &self.kernel;
+        let eval_type = self.eval_type;
 
         y.view_mut()
             .local_mut()
             .data_mut()
-            .par_chunks_mut(n_points)
+            .par_chunks_mut(target_chunk_size)
             .zip(active_cells)
-            .enumerate()
-            .for_each(|(chunk_index, (chunk, &active_cell_index))| {
+            .for_each(|(result_chunk, &active_cell_index)| {
                 let cell_entity = local_grid.entity(tdim, active_cell_index).unwrap();
-                let mut physical_points = rlst_dynamic_array2![T::Real, [gdim, n_points]];
 
-                // Get the geometry map for the cell.
-                geometry_map.points(active_cell_index, physical_points.data_mut());
+                // Get the target points for the target cell.
+                let mut target_points = rlst_dynamic_array2![T::Real, [gdim, n_points]];
+                geometry_map.points(active_cell_index, target_points.data_mut());
 
-                // We now have to iterate through all neighbouring entities of the cell.
+                // Get all the neighbouring celll indices.
+                let mut source_cells = cell_entity
+                    .topology()
+                    .connected_entity_iter(tdim)
+                    .collect_vec();
+                // We add the target cell itself to get the self interactions.
+                source_cells.push(active_cell_index);
 
-                for other_cell in cell_entity.topology().connected_entity_iter(tdim) {
+                // The next array will store the set of source points for each source cell.
+                let mut source_points = rlst_dynamic_array2![T::Real, [gdim, n_points]];
+                let mut source_charges = rlst_dynamic_array1![T, [n_points]];
+
+                // We can now go through the source cells and evaluate the kernel.
+                for &source_cell in source_cells.iter() {
                     // Get the points of the other cell.
+                    geometry_map.points(source_cell, source_points.data_mut());
+                    // Now get the right charges.
+                    source_charges.data_mut().copy_from_slice(
+                        &charges.data()[source_cell * n_points..(source_cell + 1) * n_points],
+                    );
+                    // We need to multiply the source charges with alpha
+                    source_charges.scale_inplace(alpha);
+
+                    // We need to multiply the targets with beta
+                    for value in result_chunk.iter_mut() {
+                        *value *= beta;
+                    }
+                    // Now we can evaluate into the result chunks. The evaluate routine always adds to the result array.
+                    // We use the single threaded routine here as threading is done on the chunk level.
+                    kernel.evaluate_st(
+                        eval_type,
+                        source_points.data(),
+                        target_points.data(),
+                        source_charges.data(),
+                        result_chunk,
+                    );
                 }
             });
 
