@@ -4,15 +4,16 @@ use bempp::evaluator_tools::NeighbourEvaluator;
 use bempp_distributed_tools::IndexLayoutFromLocalCounts;
 use green_kernels::laplace_3d::Laplace3dKernel;
 use mpi::traits::Communicator;
+use ndelement::types::ReferenceCellType;
 use ndgrid::{
-    traits::{Entity, Grid},
+    traits::{Entity, GeometryMap, Grid},
     types::Ownership,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rlst::{
     operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array2, AsApply, Element,
-    LinearSpace, RawAccess,
+    IndexLayout, LinearSpace, RandomAccessMut, RawAccess,
 };
 
 fn main() {
@@ -39,7 +40,7 @@ fn main() {
 
     let space = DistributedArrayVectorSpace::<_, f64>::new(&index_layout);
 
-    let evaluator = NeighbourEvaluator::new(
+    let neighbour_evaluator = NeighbourEvaluator::new(
         points.data(),
         Laplace3dKernel::default(),
         green_kernels::types::GreenKernelEvalType::Value,
@@ -48,13 +49,45 @@ fn main() {
         &grid,
     );
 
-    // Create an element in the space.
+    // We now manually test the evaluator. For that we first create a dense evaluator so that we have comparison.
+
+    // For the evaluator we need all the points.
+
+    let mut physical_points = vec![0 as f64; 3 * n_points * n_cells];
+
+    let geometry_map = grid.geometry_map(ReferenceCellType::Triangle, points.data());
+
+    for cell in grid
+        .entity_iter(2)
+        .filter(|e| matches!(e.ownership(), Ownership::Owned))
+    {
+        let start_index = 3 * index_layout
+            .global2local(world.rank() as usize, n_points * cell.global_index())
+            .unwrap();
+        geometry_map.points(
+            cell.local_index(),
+            &mut physical_points[start_index..start_index + 3 * n_points],
+        );
+    }
+
+    let kernel_evaluator = bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
+        &physical_points,
+        &physical_points,
+        green_kernels::types::GreenKernelEvalType::Value,
+        true,
+        Laplace3dKernel::default(),
+        &space,
+        &space,
+    );
 
     let mut x = space.zero();
 
-    x.view_mut()
-        .local_mut()
-        .fill_from_equally_distributed(&mut rng);
+    *x.view_mut().local_mut().get_mut([0]).unwrap() = 1.0;
+    *x.view_mut().local_mut().get_mut([1]).unwrap() = 2.0;
 
-    let _res = evaluator.apply(&x);
+    let actual = neighbour_evaluator.apply(&x);
+    let expected = kernel_evaluator.apply(&x);
+
+    println!("Actual: {}", actual.view().local()[[0]]);
+    println!("Expected: {}", expected.view().local()[[0]]);
 }

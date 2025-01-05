@@ -30,13 +30,18 @@ itertools = "0.13.*"
 mpi = { version = "0.8.*"}
 num = "0.4"
 ndelement = { git="https://github.com/bempp/ndelement.git", features = ["mpi"]}
+# ndelement = { path = "../ndelement", features = ["mpi"] }
 ndgrid = { git="https://github.com/bempp/ndgrid.git", features = ["serde"] }
+# ndgrid = { path = "../ndgrid", features = ["serde"]}
 # ndgrid = { path = "../ndgrid" }
 rayon = "1.9"
 rlst = { git = "https://github.com/linalg-rs/rlst.git", features = ["mpi"] }
+# rlst = { path = "../rlst", features = ["mpi"] }
 green-kernels = { git = "https://github.com/bempp/green-kernels.git", features = ["mpi"] }
+# green-kernels = { path = "../green-kernels", features = ["mpi"] }
 # c-api-tools = { version = "0.1.0" }
 kifmm = { git = "https://github.com/bempp/kifmm.git", features = ["mpi"] }
+# kifmm = { path = "../kifmm/kifmm", features = ["mpi"] }
 bempp-distributed-tools = { git = "https://github.com/bempp/distributed_tools.git"}
 rand = "0.8"
 rand_chacha = "0.3"

@@ -39,7 +39,6 @@ pub fn basis_to_point_map<
     range_space: &'a DistributedArrayVectorSpace<'a, RangeLayout, T>,
     quadrature_points: &[T::Real],
     quadrature_weights: &[T::Real],
-    return_transpose: bool,
 ) -> DistributedCsrMatrixOperator<'a, DomainLayout, RangeLayout, T, C>
 where
     T::Real: Equivalence,
@@ -146,31 +145,150 @@ where
         }
     }
 
-    if return_transpose {
-        DistributedCsrMatrixOperator::new(
-            DistributedCsrMatrix::from_aij(
-                domain_space.index_layout(),
-                range_space.index_layout(),
-                &cols,
-                &rows,
-                &data,
-            ),
-            domain_space,
-            range_space,
-        )
-    } else {
-        DistributedCsrMatrixOperator::new(
-            DistributedCsrMatrix::from_aij(
-                domain_space.index_layout(),
-                range_space.index_layout(),
-                &rows,
-                &cols,
-                &data,
-            ),
-            domain_space,
-            range_space,
-        )
+    DistributedCsrMatrixOperator::new(
+        DistributedCsrMatrix::from_aij(
+            domain_space.index_layout(),
+            range_space.index_layout(),
+            &rows,
+            &cols,
+            &data,
+        ),
+        domain_space,
+        range_space,
+    )
+}
+
+/// Create a linear operator from the map of points to basis.
+pub fn point_to_basis_map<
+    'a,
+    C: Communicator,
+    DomainLayout: IndexLayout<Comm = C>,
+    RangeLayout: IndexLayout<Comm = C>,
+    T: RlstScalar + Equivalence,
+    Space: FunctionSpaceTrait<T = T>,
+>(
+    function_space: &Space,
+    domain_space: &'a DistributedArrayVectorSpace<'a, DomainLayout, T>,
+    range_space: &'a DistributedArrayVectorSpace<'a, RangeLayout, T>,
+    quadrature_points: &[T::Real],
+    quadrature_weights: &[T::Real],
+) -> DistributedCsrMatrixOperator<'a, DomainLayout, RangeLayout, T, C>
+where
+    T::Real: Equivalence,
+{
+    // Get the grid.
+    let grid = function_space.grid();
+
+    // Topological dimension of the grid.
+    let tdim = grid.topology_dim();
+
+    // The method is currently restricted to single element type grids.
+    // So let's make sure that this is the case.
+
+    assert_eq!(grid.entity_types(tdim).len(), 1);
+
+    let reference_cell = grid.entity_types(tdim)[0];
+
+    // Number of cells. We are only interested in owned cells.
+    let n_cells = grid
+        .entity_iter(tdim)
+        .filter(|e| matches!(e.ownership(), Ownership::Owned))
+        .count();
+
+    // Get the number of quadrature points and check that weights
+    // and points have compatible dimensions.
+
+    let n_quadrature_points = quadrature_weights.len();
+    assert_eq!(quadrature_points.len() % tdim, 0);
+    assert_eq!(quadrature_points.len() / tdim, n_quadrature_points);
+
+    // Check that domain space and function space are compatible.
+
+    let n_domain_dofs = domain_space.index_layout().number_of_global_indices();
+    let n_range_dofs = range_space.index_layout().number_of_global_indices();
+
+    assert_eq!(function_space.local_size(), n_range_dofs,);
+
+    assert_eq!(n_cells * n_quadrature_points, n_domain_dofs);
+
+    // All the dimensions are OK. Let's get to work. We need to iterate through the elements,
+    // get the attached global dofs and the corresponding jacobian map.
+
+    // Let's first tabulate the basis function values at the quadrature points on the reference element.
+
+    // Quadrature point is needed here as a RLST matrix.
+
+    let quadrature_points = rlst_array_from_slice2!(quadrature_points, [tdim, n_quadrature_points]);
+
+    let mut table = rlst_dynamic_array4!(
+        T,
+        function_space
+            .element(reference_cell)
+            .tabulate_array_shape(0, n_quadrature_points)
+    );
+    function_space
+        .element(reference_cell)
+        .tabulate(&quadrature_points, 0, &mut table);
+
+    // We have tabulated the basis functions on the reference element. Now need
+    // the map to physical elements.
+
+    let geometry_evaluator = grid.geometry_map(reference_cell, quadrature_points.data());
+
+    // The following arrays hold the jacobians, their determinants and the normals.
+
+    let mut jacobians =
+        rlst_dynamic_array3![T::Real, [grid.geometry_dim(), tdim, n_quadrature_points]];
+    let mut jdets = rlst_dynamic_array1![T::Real, [n_quadrature_points]];
+    let mut normals = rlst_dynamic_array2![T::Real, [grid.geometry_dim(), n_quadrature_points]];
+
+    // Now iterate through the cells of the grid, get the attached dofs and evaluate the geometry map.
+
+    // These arrays store the data of the transformation matrix.
+    let mut rows = Vec::<usize>::default();
+    let mut cols = Vec::<usize>::default();
+    let mut data = Vec::<T>::default();
+
+    for cell in grid
+        .entity_iter(tdim)
+        .filter(|e| matches!(e.ownership(), Ownership::Owned))
+    {
+        // Get the Jacobians
+        geometry_evaluator.jacobians_dets_normals(
+            cell.local_index(),
+            jacobians.data_mut(),
+            jdets.data_mut(),
+            normals.data_mut(),
+        );
+        // Get the global dofs of the cell.
+        let global_dofs = function_space
+            .cell_dofs(cell.local_index())
+            .unwrap()
+            .iter()
+            .map(|local_dof_index| function_space.global_dof_index(*local_dof_index))
+            .collect::<Vec<_>>();
+
+        for (qindex, (jdet, qweight)) in izip!(jdets.iter(), quadrature_weights.iter()).enumerate()
+        {
+            for (i, global_dof) in global_dofs.iter().enumerate() {
+                cols.push(n_quadrature_points * cell.global_index() + qindex);
+                rows.push(*global_dof);
+                data.push(T::from_real(jdet * *qweight) * table[[0, qindex, i, 0]]);
+            }
+        }
     }
+
+    DistributedCsrMatrixOperator::new(
+        DistributedCsrMatrix::from_aij(
+            domain_space.index_layout(),
+            range_space.index_layout(),
+            &rows,
+            &cols,
+            &data,
+        ),
+        domain_space,
+        range_space,
+    )
 }
 
 /// Create a linear operator from the map of a basis to points.
@@ -503,7 +621,7 @@ where
                 // Get all the neighbouring celll indices.
                 // This is a bit cumbersome. We go through the points of the target cell and add all cells that are connected
                 // to each point, using a `unique` iterator to remove duplicates.
-                let mut source_cells = cell_entity
+                let source_cells = cell_entity
                     .topology()
                     .sub_entity_iter(0)
                     .flat_map(|v| {
@@ -516,12 +634,15 @@ where
                     })
                     .unique()
                     .collect_vec();
-                // We add the target cell itself to get the self interactions.
-                source_cells.push(active_cell_index);
 
                 // The next array will store the set of source points for each source cell.
                 let mut source_points = rlst_dynamic_array2![T::Real, [gdim, n_points]];
                 let mut source_charges = rlst_dynamic_array1![T, [n_points]];
+
+                // We need to multiply the targets with beta
+                for value in result_chunk.iter_mut() {
+                    *value *= beta;
+                }
 
                 // We can now go through the source cells and evaluate the kernel.
                 for &source_cell in source_cells.iter() {
@@ -534,10 +655,6 @@ where
                     // We need to multiply the source charges with alpha
                     source_charges.scale_inplace(alpha);
 
-                    // We need to multiply the targets with beta
-                    for value in result_chunk.iter_mut() {
-                        *value *= beta;
-                    }
                     // Now we can evaluate into the result chunks. The evaluate routine always adds to the result array.
                     // We use the single threaded routine here as threading is done on the chunk level.
                     kernel.evaluate_st(
