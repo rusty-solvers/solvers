@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, marker::PhantomData};
 
-use bempp_distributed_tools::GhostCommunicator;
+use bempp_distributed_tools::{GhostCommunicator, IndexLayoutFromLocalCounts};
 use green_kernels::{traits::Kernel, types::GreenKernelEvalType};
 use itertools::{izip, Itertools};
 use mpi::traits::{Communicator, Equivalence};
@@ -14,8 +14,13 @@ use ndgrid::{
 
 use rayon::prelude::*;
 use rlst::{
-    operator::interface::{
-        distributed_sparse_operator::DistributedCsrMatrixOperator, DistributedArrayVectorSpace,
+    operator::{
+        interface::{
+            distributed_array_vector_space,
+            distributed_sparse_operator::DistributedCsrMatrixOperatorImpl,
+            DistributedArrayVectorSpace,
+        },
+        Operator,
     },
     rlst_array_from_slice2, rlst_dynamic_array1, rlst_dynamic_array2, rlst_dynamic_array3,
     rlst_dynamic_array4, Array, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
@@ -35,11 +40,9 @@ pub fn basis_to_point_map<
     Space: FunctionSpaceTrait<T = T>,
 >(
     function_space: &Space,
-    domain_space: &'a DistributedArrayVectorSpace<'a, DomainLayout, T>,
-    range_space: &'a DistributedArrayVectorSpace<'a, RangeLayout, T>,
     quadrature_points: &[T::Real],
     quadrature_weights: &[T::Real],
-) -> DistributedCsrMatrixOperator<'a, DomainLayout, RangeLayout, T, C>
+) -> Operator<DistributedCsrMatrixOperatorImpl<'a, DomainLayout, RangeLayout, T, C>>
 where
     T::Real: Equivalence,
 {
@@ -69,14 +72,10 @@ where
     assert_eq!(quadrature_points.len() % tdim, 0);
     assert_eq!(quadrature_points.len() / tdim, n_quadrature_points);
 
-    // Check that domain space and function space are compatible.
+    // Assign number of domain and range dofs.
 
-    let n_domain_dofs = domain_space.index_layout().number_of_global_indices();
-    let n_range_dofs = range_space.index_layout().number_of_global_indices();
-
-    assert_eq!(function_space.local_size(), n_domain_dofs,);
-
-    assert_eq!(n_cells * n_quadrature_points, n_range_dofs);
+    let n_domain_dofs = function_space.local_size();
+    let n_range_dofs = n_cells * n_quadrature_points;
 
     // All the dimensions are OK. Let's get to work. We need to iterate through the elements,
     // get the attached global dofs and the corresponding jacobian map.

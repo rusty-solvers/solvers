@@ -2,6 +2,7 @@
 
 //mod function_space;
 
+use bempp_distributed_tools::IndexLayoutFromLocalCounts;
 use mpi::request::WaitGuard;
 use mpi::traits::{Communicator, Destination, Source};
 use ndelement::ciarlet::CiarletElement;
@@ -13,6 +14,7 @@ use ndgrid::{traits::Grid, types::Ownership};
 use rlst::{MatrixInverse, RlstScalar};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::ops::Index;
 
 type DofList = Vec<Vec<usize>>;
 type OwnerData = Vec<(usize, usize, usize, usize)>;
@@ -58,6 +60,12 @@ pub trait LocalFunctionSpaceTrait {
 
     /// Get ownership of a local DOF
     fn ownership(&self, local_dof_index: usize) -> Ownership;
+
+    /// Get the local indices of the support cells associated with this space.
+    ///
+    /// The vector of support cells is sorted in ascending order and may contain
+    /// ghost cells who are not owned by the current process.
+    fn support_cells(&self) -> &[usize];
 }
 
 /// A function space
@@ -79,6 +87,9 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
 
     /// Get the local function space
     fn local_space(&self) -> &Self::LocalFunctionSpace;
+
+    /// Return the index layout associated with the function space.
+    fn index_layout(&self) -> &IndexLayoutFromLocalCounts<'_, Self::C>;
 }
 
 /// Definition of a local function space.
@@ -95,6 +106,7 @@ pub struct LocalFunctionSpace<
     global_size: usize,
     global_dof_numbers: Vec<usize>,
     ownership: Vec<Ownership>,
+    support_cells: Vec<usize>,
 }
 
 impl<
@@ -124,6 +136,7 @@ impl<
             global_size,
             global_dof_numbers,
             ownership,
+            support_cells: (0..local_size).collect(),
         }
     }
 }
@@ -245,6 +258,10 @@ impl<
     fn ownership(&self, local_dof_index: usize) -> Ownership {
         self.ownership[local_dof_index]
     }
+
+    fn support_cells(&self) -> &[usize] {
+        self.support_cells.as_slice()
+    }
 }
 
 /// Implementation of a general function space.
@@ -256,6 +273,7 @@ pub struct FunctionSpace<
 > {
     grid: &'a GridImpl,
     local_space: LocalFunctionSpace<'a, T, GridImpl::LocalGrid>,
+    index_layout: IndexLayoutFromLocalCounts<'a, C>,
     _marker: PhantomData<(C, T)>,
 }
 
@@ -401,6 +419,7 @@ where
                 global_dof_numbers,
                 ownership,
             ),
+            index_layout: IndexLayoutFromLocalCounts::new(dofmap_size, comm),
             _marker: PhantomData,
         }
 
@@ -471,6 +490,10 @@ impl<
         // Syntactical workaround as rust-analyzer mixed up this ownership with entity ownership.
         LocalFunctionSpaceTrait::ownership(&self.local_space, local_dof_index)
     }
+
+    fn support_cells(&self) -> &[usize] {
+        self.local_space.support_cells()
+    }
 }
 
 impl<
@@ -492,6 +515,10 @@ impl<
 
     fn local_space(&self) -> &Self::LocalFunctionSpace {
         &self.local_space
+    }
+
+    fn index_layout(&self) -> &IndexLayoutFromLocalCounts<'_, Self::C> {
+        &self.index_layout
     }
 }
 
