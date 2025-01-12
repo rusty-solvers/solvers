@@ -2,7 +2,6 @@
 
 //mod function_space;
 
-use bempp_distributed_tools::IndexLayoutFromLocalCounts;
 use mpi::request::WaitGuard;
 use mpi::traits::{Communicator, Destination, Source};
 use ndelement::ciarlet::CiarletElement;
@@ -11,10 +10,11 @@ use ndelement::{traits::FiniteElement, types::ReferenceCellType};
 use ndgrid::traits::ParallelGrid;
 use ndgrid::traits::{Entity, Topology};
 use ndgrid::{traits::Grid, types::Ownership};
-use rlst::{MatrixInverse, RlstScalar};
+use rlst::{IndexLayout, MatrixInverse, RlstScalar};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Index;
+use std::rc::Rc;
 
 type DofList = Vec<Vec<usize>>;
 type OwnerData = Vec<(usize, usize, usize, usize)>;
@@ -89,7 +89,7 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
     fn local_space(&self) -> &Self::LocalFunctionSpace;
 
     /// Return the index layout associated with the function space.
-    fn index_layout(&self) -> &IndexLayoutFromLocalCounts<'_, Self::C>;
+    fn index_layout(&self) -> Rc<IndexLayout<'_, Self::C>>;
 }
 
 /// Definition of a local function space.
@@ -127,6 +127,11 @@ impl<
         global_dof_numbers: Vec<usize>,
         ownership: Vec<Ownership>,
     ) -> Self {
+        let cell_count = grid
+            .entity_types(grid.topology_dim())
+            .iter()
+            .map(|&i| grid.entity_count(i))
+            .sum();
         Self {
             grid,
             elements,
@@ -136,7 +141,8 @@ impl<
             global_size,
             global_dof_numbers,
             ownership,
-            support_cells: (0..local_size).collect(),
+            // At the moment all spaces are global.
+            support_cells: (0..cell_count).collect(),
         }
     }
 }
@@ -273,7 +279,7 @@ pub struct FunctionSpace<
 > {
     grid: &'a GridImpl,
     local_space: LocalFunctionSpace<'a, T, GridImpl::LocalGrid>,
-    index_layout: IndexLayoutFromLocalCounts<'a, C>,
+    index_layout: Rc<IndexLayout<'a, C>>,
     _marker: PhantomData<(C, T)>,
 }
 
@@ -419,7 +425,7 @@ where
                 global_dof_numbers,
                 ownership,
             ),
-            index_layout: IndexLayoutFromLocalCounts::new(dofmap_size, comm),
+            index_layout: IndexLayout::from_local_counts(dofmap_size, comm),
             _marker: PhantomData,
         }
 
@@ -517,8 +523,8 @@ impl<
         &self.local_space
     }
 
-    fn index_layout(&self) -> &IndexLayoutFromLocalCounts<'_, Self::C> {
-        &self.index_layout
+    fn index_layout(&self) -> Rc<IndexLayout<'_, Self::C>> {
+        self.index_layout.clone()
     }
 }
 

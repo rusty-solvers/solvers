@@ -9,7 +9,6 @@ use crate::boundary_assemblers::cell_pair_assemblers::{
 use crate::boundary_assemblers::helpers::KernelEvaluator;
 use crate::boundary_assemblers::helpers::{equal_grids, RawData2D, RlstArray, SparseMatrixData};
 use crate::function::{FunctionSpaceTrait, LocalFunctionSpaceTrait};
-use bempp_distributed_tools::index_layout;
 use bempp_quadrature::duffy::{
     quadrilateral_duffy, quadrilateral_triangle_duffy, triangle_duffy, triangle_quadrilateral_duffy,
 };
@@ -122,19 +121,13 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
     BoundaryAssembler<'o, T, Integrand, K>
 {
     /// Assemble the singular part into a CSR matrix.
-    pub fn assemble_singular<
-        'a,
-        C: Communicator,
-        TrialLayout: IndexLayout<Comm = C>,
-        TestLayout: IndexLayout<Comm = C>,
-        Space: FunctionSpaceTrait<T = T>,
-    >(
+    pub fn assemble_singular<'a, C: Communicator, Space: FunctionSpaceTrait<T = T>>(
         &self,
         trial_space: &Space,
-        trial_index_layout: &'a TrialLayout,
+        trial_index_layout: &'a IndexLayout<'a, C>,
         test_space: &Space,
-        test_index_layout: &'a TestLayout,
-    ) -> DistributedCsrMatrix<'a, TrialLayout, TestLayout, T, C>
+        test_index_layout: &'a IndexLayout<'a, C>,
+    ) -> DistributedCsrMatrix<'a, T, C>
     where
         Space::LocalFunctionSpace: Sync,
         T: Equivalence,

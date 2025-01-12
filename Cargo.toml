@@ -54,6 +54,8 @@ criterion = { version = "0.5.*", features = ["html_reports"] }
 
 [build-dependencies]
 cbindgen = "0.27.0"
+cc = "=1.2.7"
+
 
 [[bench]]
 name = "assembly_benchmark"
