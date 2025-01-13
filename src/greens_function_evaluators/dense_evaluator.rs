@@ -1,10 +1,14 @@
 //! A dense evaluator for Green's functions.
 
+use std::rc::Rc;
+
 use green_kernels::{traits::DistributedKernelEvaluator, types::GreenKernelEvalType};
 use mpi::traits::{Communicator, Equivalence};
+use num::One;
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, Element,
-    IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
+    operator::{interface::DistributedArrayVectorSpace, zero_element},
+    rlst_dynamic_array1, AsApply, Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut,
+    RlstScalar,
 };
 
 /// Wrapper for a dense Green's function evaluator.
@@ -12,8 +16,6 @@ pub struct DenseEvaluator<
     'a,
     C: Communicator,
     T: RlstScalar + Equivalence,
-    SourceLayout: IndexLayout<Comm = C>,
-    TargetLayout: IndexLayout<Comm = C>,
     K: DistributedKernelEvaluator<T = T>,
 > where
     T::Real: Equivalence,
@@ -23,17 +25,12 @@ pub struct DenseEvaluator<
     eval_mode: GreenKernelEvalType,
     use_multithreaded: bool,
     kernel: K,
-    domain_space: &'a DistributedArrayVectorSpace<'a, SourceLayout, T>,
-    range_space: &'a DistributedArrayVectorSpace<'a, TargetLayout, T>,
+    domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+    range_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
 }
 
-impl<
-        C: Communicator,
-        T: RlstScalar + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-        K: DistributedKernelEvaluator<T = T>,
-    > std::fmt::Debug for DenseEvaluator<'_, C, T, SourceLayout, TargetLayout, K>
+impl<C: Communicator, T: RlstScalar + Equivalence, K: DistributedKernelEvaluator<T = T>>
+    std::fmt::Debug for DenseEvaluator<'_, C, T, K>
 where
     T::Real: Equivalence,
 {
@@ -47,14 +44,8 @@ where
     }
 }
 
-impl<
-        'a,
-        C: Communicator,
-        T: RlstScalar + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-        K: DistributedKernelEvaluator<T = T>,
-    > DenseEvaluator<'a, C, T, SourceLayout, TargetLayout, K>
+impl<'a, C: Communicator, T: RlstScalar + Equivalence, K: DistributedKernelEvaluator<T = T>>
+    DenseEvaluator<'a, C, T, K>
 where
     T::Real: Equivalence,
 {
@@ -65,8 +56,8 @@ where
         eval_mode: GreenKernelEvalType,
         use_multithreaded: bool,
         kernel: K,
-        domain_space: &'a DistributedArrayVectorSpace<'a, SourceLayout, T>,
-        range_space: &'a DistributedArrayVectorSpace<'a, TargetLayout, T>,
+        domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+        range_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
     ) -> Self {
         // We want that both layouts have the same communicator.
         assert!(std::ptr::addr_eq(domain_space.comm(), range_space.comm()));
@@ -112,37 +103,26 @@ where
     }
 }
 
-impl<
-        'a,
-        C: Communicator,
-        T: RlstScalar + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-        K: DistributedKernelEvaluator<T = T>,
-    > OperatorBase for DenseEvaluator<'a, C, T, SourceLayout, TargetLayout, K>
+impl<'a, C: Communicator, T: RlstScalar + Equivalence, K: DistributedKernelEvaluator<T = T>>
+    OperatorBase for DenseEvaluator<'a, C, T, K>
 where
     T::Real: Equivalence,
 {
-    type Domain = DistributedArrayVectorSpace<'a, SourceLayout, T>;
+    type Domain = DistributedArrayVectorSpace<'a, C, T>;
 
-    type Range = DistributedArrayVectorSpace<'a, TargetLayout, T>;
+    type Range = DistributedArrayVectorSpace<'a, C, T>;
 
-    fn domain(&self) -> &Self::Domain {
-        self.domain_space
+    fn domain(&self) -> Rc<Self::Domain> {
+        self.domain_space.clone()
     }
 
-    fn range(&self) -> &Self::Range {
-        self.range_space
+    fn range(&self) -> Rc<Self::Range> {
+        self.range_space.clone()
     }
 }
 
-impl<
-        C: Communicator,
-        T: RlstScalar + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-        K: DistributedKernelEvaluator<T = T>,
-    > AsApply for DenseEvaluator<'_, C, T, SourceLayout, TargetLayout, K>
+impl<C: Communicator, T: RlstScalar + Equivalence, K: DistributedKernelEvaluator<T = T>> AsApply
+    for DenseEvaluator<'_, C, T, K>
 where
     T::Real: Equivalence,
 {
@@ -152,7 +132,7 @@ where
         x: &<Self::Domain as rlst::LinearSpace>::E,
         beta: <Self::Range as rlst::LinearSpace>::F,
         y: &mut <Self::Range as rlst::LinearSpace>::E,
-    ) -> rlst::RlstResult<()> {
+    ) {
         y.scale_inplace(beta);
         let mut charges = rlst_dynamic_array1!(
             T,
@@ -170,7 +150,14 @@ where
             self.use_multithreaded,
             self.domain_space.comm(), // domain space and range space have the same communicator
         );
+    }
 
-        Ok(())
+    fn apply(
+        &self,
+        x: &<Self::Domain as rlst::LinearSpace>::E,
+    ) -> <Self::Range as rlst::LinearSpace>::E {
+        let mut y = zero_element(self.range());
+        self.apply_extended(<T as One>::one(), x, T::zero(), &mut y);
+        y
     }
 }

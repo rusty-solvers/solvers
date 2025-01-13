@@ -37,13 +37,8 @@ use crate::function::FunctionSpaceTrait;
 
 /// Create a linear operator from the map of a basis to points. The points are sorted by global
 /// index of the corresponding cells.
-pub fn basis_to_point_map<
-    'a,
-    C: Communicator,
-    T: RlstScalar + Equivalence,
-    Space: FunctionSpaceTrait<T = T>,
->(
-    function_space: &Space,
+pub fn basis_to_point_map<'a, T: RlstScalar + Equivalence, Space: FunctionSpaceTrait<T = T>>(
+    function_space: &'a Space,
     quadrature_points: &[T::Real],
     quadrature_weights: &[T::Real],
     return_transpose: bool,
@@ -64,7 +59,7 @@ where
 
     let reference_cell = grid.entity_types(tdim)[0];
 
-    let owned_active_cells = function_space
+    let owned_active_cells: Vec<usize> = function_space
         .support_cells()
         .iter()
         .filter(|index| {
@@ -73,9 +68,8 @@ where
                 Ownership::Owned
             )
         })
-        .sorted_by_key(|index| grid.entity(tdim, *index).unwrap().global_index())
-        .map(|index| grid.entity(tdim, *index).unwrap().global_index())
         .copied()
+        .sorted_by_key(|&index| grid.entity(tdim, index).unwrap().global_index())
         .collect_vec();
 
     // Number of cells. We are only interested in owned cells.
@@ -171,9 +165,21 @@ where
     }
 
     if return_transpose {
-        DistributedCsrMatrix::from_aij(range_layout, domain_layout, &cols, &rows, &data).into()
+        Operator::from(DistributedCsrMatrix::from_aij(
+            range_layout,
+            domain_layout,
+            &cols,
+            &rows,
+            &data,
+        ))
     } else {
-        DistributedCsrMatrix::from_aij(domain_layout, range_layout, &rows, &cols, &data).into()
+        Operator::from(DistributedCsrMatrix::from_aij(
+            domain_layout,
+            range_layout,
+            &rows,
+            &cols,
+            &data,
+        ))
     }
 }
 
@@ -235,17 +241,19 @@ impl<
 
         let active_cells = active_cells
             .iter()
-            .sorted_by_key(|&index| grid.entity(tdim, index).unwrap().global_index())
             .copied()
+            .sorted_by_key(|&index| grid.entity(tdim, index).unwrap().global_index())
             .collect_vec();
 
-        let owned_active_cells = active_cells
+        let owned_active_cells: Vec<usize> = active_cells
+            .iter()
             .filter(|index| {
                 matches!(
                     grid.entity(tdim, **index).unwrap().ownership(),
                     Ownership::Owned
                 )
             })
+            .copied()
             .collect_vec();
 
         let n_cells = owned_active_cells.len();
@@ -273,8 +281,8 @@ impl<
         // We also want to create a map from global cell indices to owned active cell indices.
         let mut global_cell_index_to_owned_active_cell_index = HashMap::<usize, usize>::default();
 
-        for (owned_active_index, cell_index) in owned_active_cells.iter().enumerate() {
-            let cell = grid.entity(tdim, *cell_index).unwrap();
+        for (owned_active_index, &cell_index) in owned_active_cells.iter().enumerate() {
+            let cell = grid.entity(tdim, cell_index).unwrap();
             global_cell_index_to_owned_active_cell_index
                 .insert(cell.global_index(), owned_active_index);
         }

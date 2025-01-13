@@ -1,6 +1,6 @@
 //! Interface to kifmm library
 
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 use bempp_distributed_tools::{self, permutation::DataPermutation};
 
@@ -24,38 +24,29 @@ use kifmm::{
 use mpi::traits::{Communicator, Equivalence};
 use num::Float;
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, Element,
-    IndexLayout, MatrixSvd, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
+    operator::{interface::DistributedArrayVectorSpace, zero_element},
+    rlst_dynamic_array1, AsApply, Element, IndexLayout, MatrixSvd, OperatorBase, RawAccess,
+    RawAccessMut, RlstScalar,
 };
 
 /// This structure instantiates an FMM evaluator.
-pub struct KiFmmEvaluator<
-    'a,
-    C: Communicator,
-    T: RlstScalar + Equivalence,
-    SourceLayout: IndexLayout<Comm = C>,
-    TargetLayout: IndexLayout<Comm = C>,
-> where
+pub struct KiFmmEvaluator<'a, C: Communicator, T: RlstScalar + Equivalence>
+where
     T::Real: Equivalence,
     T: DftType<InputType = T, OutputType = <T as AsComplex>::ComplexType>,
     T: Dft + AsComplex + Epsilon + MatrixSvd + Float,
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: SourceToTargetTranslationMetadata,
 {
-    domain_space: &'a DistributedArrayVectorSpace<'a, SourceLayout, T>,
-    range_space: &'a DistributedArrayVectorSpace<'a, TargetLayout, T>,
-    source_permutation: DataPermutation<'a, SourceLayout>,
-    target_permutation: DataPermutation<'a, TargetLayout>,
+    domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+    range_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+    source_permutation: DataPermutation<'a, C>,
+    target_permutation: DataPermutation<'a, C>,
     n_permuted_sources: usize,
     n_permuted_targets: usize,
     fmm: RefCell<KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>>,
 }
 
-impl<
-        C: Communicator,
-        T: RlstScalar + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-    > std::fmt::Debug for KiFmmEvaluator<'_, C, T, SourceLayout, TargetLayout>
+impl<C: Communicator, T: RlstScalar + Equivalence> std::fmt::Debug for KiFmmEvaluator<'_, C, T>
 where
     T::Real: Equivalence,
     T: DftType<InputType = T, OutputType = <T as AsComplex>::ComplexType>,
@@ -72,13 +63,7 @@ where
     }
 }
 
-impl<
-        'a,
-        C: Communicator,
-        T: RlstScalar<Real = T> + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-    > KiFmmEvaluator<'a, C, T, SourceLayout, TargetLayout>
+impl<'a, C: Communicator, T: RlstScalar<Real = T> + Equivalence> KiFmmEvaluator<'a, C, T>
 where
     T::Real: Equivalence,
     T: DftType<InputType = T, OutputType = <T as AsComplex>::ComplexType>,
@@ -92,8 +77,8 @@ where
         local_tree_depth: usize,
         global_tree_depth: usize,
         expansion_order: usize,
-        domain_space: &'a DistributedArrayVectorSpace<'a, SourceLayout, T>,
-        range_space: &'a DistributedArrayVectorSpace<'a, TargetLayout, T>,
+        domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+        range_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
     ) -> Self {
         // We want that both layouts have the same communicator.
         assert!(std::ptr::addr_eq(domain_space.comm(), range_space.comm()));
@@ -169,38 +154,28 @@ where
     }
 }
 
-impl<
-        'a,
-        C: Communicator,
-        T: RlstScalar<Real = T> + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-    > OperatorBase for KiFmmEvaluator<'a, C, T, SourceLayout, TargetLayout>
+impl<'a, C: Communicator, T: RlstScalar<Real = T> + Equivalence> OperatorBase
+    for KiFmmEvaluator<'a, C, T>
 where
     T::Real: Equivalence,
     T: DftType<InputType = T, OutputType = <T as AsComplex>::ComplexType>,
     T: Dft + AsComplex + Epsilon + MatrixSvd + Float,
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: SourceToTargetTranslationMetadata,
 {
-    type Domain = DistributedArrayVectorSpace<'a, SourceLayout, T>;
+    type Domain = DistributedArrayVectorSpace<'a, C, T>;
 
-    type Range = DistributedArrayVectorSpace<'a, TargetLayout, T>;
+    type Range = DistributedArrayVectorSpace<'a, C, T>;
 
-    fn domain(&self) -> &Self::Domain {
-        self.domain_space
+    fn domain(&self) -> Rc<Self::Domain> {
+        self.domain_space.clone()
     }
 
-    fn range(&self) -> &Self::Range {
-        self.range_space
+    fn range(&self) -> Rc<Self::Range> {
+        self.range_space.clone()
     }
 }
 
-impl<
-        C: Communicator,
-        T: RlstScalar<Real = T> + Equivalence,
-        SourceLayout: IndexLayout<Comm = C>,
-        TargetLayout: IndexLayout<Comm = C>,
-    > AsApply for KiFmmEvaluator<'_, C, T, SourceLayout, TargetLayout>
+impl<C: Communicator, T: RlstScalar<Real = T> + Equivalence> AsApply for KiFmmEvaluator<'_, C, T>
 where
     T::Real: Equivalence,
     T: DftType<InputType = T, OutputType = <T as AsComplex>::ComplexType>,
@@ -219,7 +194,7 @@ where
         x: &<Self::Domain as rlst::LinearSpace>::E,
         beta: <Self::Range as rlst::LinearSpace>::F,
         y: &mut <Self::Range as rlst::LinearSpace>::E,
-    ) -> rlst::RlstResult<()> {
+    ) {
         let mut x_permuted = rlst_dynamic_array1![T, [self.n_permuted_sources]];
         let mut y_permuted = rlst_dynamic_array1![T, [self.n_permuted_targets]];
 
@@ -262,7 +237,14 @@ where
         y.scale_inplace(beta);
         // Now add the result.
         y.view_mut().local_mut().sum_into(y_result.r());
+    }
 
-        Ok(())
+    fn apply(
+        &self,
+        x: &<Self::Domain as rlst::LinearSpace>::E,
+    ) -> <Self::Range as rlst::LinearSpace>::E {
+        let mut y = zero_element(self.range());
+        self.apply_extended(T::one(), x, T::zero(), &mut y);
+        y
     }
 }

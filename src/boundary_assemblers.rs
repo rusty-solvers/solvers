@@ -121,27 +121,15 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
     BoundaryAssembler<'o, T, Integrand, K>
 {
     /// Assemble the singular part into a CSR matrix.
-    pub fn assemble_singular<'a, C: Communicator, Space: FunctionSpaceTrait<T = T>>(
+    pub fn assemble_singular<'a, C: Communicator, Space: FunctionSpaceTrait<T = T, C = C>>(
         &self,
-        trial_space: &Space,
-        trial_index_layout: &'a IndexLayout<'a, C>,
-        test_space: &Space,
-        test_index_layout: &'a IndexLayout<'a, C>,
+        trial_space: &'a Space,
+        test_space: &'a Space,
     ) -> DistributedCsrMatrix<'a, T, C>
     where
         Space::LocalFunctionSpace: Sync,
         T: Equivalence,
     {
-        assert_eq!(
-            trial_space.global_size(),
-            trial_index_layout.number_of_global_indices()
-        );
-
-        assert_eq!(
-            test_space.global_size(),
-            test_index_layout.number_of_global_indices()
-        );
-
         let shape = [test_space.global_size(), trial_space.global_size()];
         let sparse_matrix =
             self.assemble_singular_part(shape, trial_space.local_space(), test_space.local_space());
@@ -149,8 +137,8 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
         // Instantiate the CSR matrix.
 
         DistributedCsrMatrix::from_aij(
-            trial_index_layout,
-            test_index_layout,
+            trial_space.index_layout(),
+            test_space.index_layout(),
             &sparse_matrix.rows,
             &sparse_matrix.cols,
             &sparse_matrix.data,
