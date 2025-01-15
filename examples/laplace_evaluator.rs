@@ -29,7 +29,7 @@ fn main() {
 
     let mut rng = ChaCha8Rng::seed_from_u64(world.rank() as u64);
 
-    let grid = bempp::shapes::regular_sphere::<f64, _>(6, 1, &world);
+    let grid = bempp::shapes::regular_sphere::<f64, _>(5, 1, &world);
 
     let quad_degree = 6;
     // Get the number of cells in the grid.

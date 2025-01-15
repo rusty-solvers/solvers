@@ -25,7 +25,7 @@ use rlst::{
             distributed_sparse_operator::DistributedCsrMatrixOperatorImpl,
             DistributedArrayVectorSpace,
         },
-        Operator,
+        zero_element, Operator,
     },
     rlst_array_from_slice2, rlst_dynamic_array1, rlst_dynamic_array2, rlst_dynamic_array3,
     rlst_dynamic_array4, Array, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
@@ -577,6 +577,8 @@ where
         &self,
         x: &<Self::Domain as rlst::LinearSpace>::E,
     ) -> <Self::Range as rlst::LinearSpace>::E {
-        todo!()
+        let mut y = zero_element(self.range());
+        self.apply_extended(T::one(), x, T::zero(), &mut y);
+        y
     }
 }
