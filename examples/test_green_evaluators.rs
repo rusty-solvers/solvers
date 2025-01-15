@@ -1,14 +1,15 @@
 // Compare dense and FMM Green's function evaluators.
 
+use std::rc::Rc;
+
 use bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator;
-use bempp_distributed_tools::IndexLayoutFromLocalCounts;
 use green_kernels::{laplace_3d::Laplace3dKernel, types::GreenKernelEvalType};
 use mpi::traits::{Communicator, Root};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, Element,
-    LinearSpace, NormedSpace, RawAccessMut,
+    operator::{interface::DistributedArrayVectorSpace, zero_element},
+    rlst_dynamic_array1, AsApply, Element, IndexLayout, LinearSpace, NormedSpace, RawAccessMut,
 };
 
 fn main() {
@@ -35,15 +36,15 @@ fn main() {
 
     // Initalise the index layout.
 
-    let index_layout = IndexLayoutFromLocalCounts::new(npoints, &world);
+    let index_layout = Rc::new(IndexLayout::from_local_counts(npoints, &world));
 
     // Create the vector space.
 
-    let space = DistributedArrayVectorSpace::<_, f64>::new(&index_layout);
+    let space = DistributedArrayVectorSpace::<_, f64>::from_index_layout(index_layout.clone());
 
     // Create a random vector of charges.
 
-    let mut charges = space.zero();
+    let mut charges = zero_element(space.clone());
 
     // charges
     //     .view_mut()
@@ -60,13 +61,14 @@ fn main() {
         GreenKernelEvalType::Value,
         false,
         Laplace3dKernel::default(),
-        &space,
-        &space,
+        space.clone(),
+        space.clone(),
     );
 
     // Create the FMM evaluator.
 
-    let fmm_evaluator = KiFmmEvaluator::new(&sources, &targets, 3, 1, 5, &space, &space);
+    let fmm_evaluator =
+        KiFmmEvaluator::new(&sources, &targets, 3, 1, 5, space.clone(), space.clone());
 
     // Apply the dense evaluator.
 
@@ -80,11 +82,7 @@ fn main() {
 
     let dense_norm = space.norm(&output_dense);
 
-    let rel_diff = space.norm(
-        &space
-            .new_from(&output_dense)
-            .sum(&space.new_from(&output_fmm).neg()),
-    ) / dense_norm;
+    let rel_diff = space.norm(&output_dense.clone().sum(&output_fmm.clone().neg())) / dense_norm;
 
     if world.rank() == 0 {
         println!("The relative error is: {}", rel_diff);
@@ -125,8 +123,9 @@ fn main() {
 
         let root_comm = mpi::topology::SimpleCommunicator::self_comm();
 
-        let index_layout_root = IndexLayoutFromLocalCounts::new(npoints * size, &root_comm);
-        let space_root = DistributedArrayVectorSpace::<_, f64>::new(&index_layout_root);
+        let index_layout_root = Rc::new(IndexLayout::from_local_counts(npoints * size, &root_comm));
+        let space_root =
+            DistributedArrayVectorSpace::<_, f64>::from_index_layout(index_layout_root);
         let evaluator_dense_on_root =
             bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
                 &gathered_sources,
@@ -134,8 +133,8 @@ fn main() {
                 GreenKernelEvalType::Value,
                 false,
                 Laplace3dKernel::default(),
-                &space_root,
-                &space_root,
+                space_root.clone(),
+                space_root.clone(),
             );
         let fmm_evaluator_on_root = KiFmmEvaluator::new(
             &gathered_sources,
@@ -143,13 +142,13 @@ fn main() {
             3,
             1,
             5,
-            &space_root,
-            &space_root,
+            space_root.clone(),
+            space_root.clone(),
         );
 
         // Create the charge vector on root.
 
-        let mut charges_on_root = space_root.zero();
+        let mut charges_on_root = zero_element(space_root);
 
         charges_on_root
             .view_mut()

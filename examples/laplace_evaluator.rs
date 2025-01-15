@@ -1,5 +1,7 @@
 //! This file implements an example Laplace evaluator test the different involved operators.
 
+use std::rc::Rc;
+
 use bempp::{
     boundary_assemblers::BoundaryAssemblerOptions, evaluator_tools::NeighbourEvaluator,
     function::LocalFunctionSpaceTrait,
@@ -15,9 +17,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rlst::{
     assert_array_relative_eq,
-    operator::interface::{
-        distributed_sparse_operator::DistributedCsrMatrixOperator, DistributedArrayVectorSpace,
-    },
+    operator::{interface::DistributedArrayVectorSpace, zero_element, Operator},
     rlst_dynamic_array1, AsApply, Element, IndexLayout, LinearSpace, MultInto, OperatorBase,
 };
 
@@ -58,34 +58,30 @@ fn main() {
 
     //First initialise the index layouts.
 
-    let space_layout =
-        bempp_distributed_tools::SingleProcessIndexLayout::new(0, space.global_size(), &world);
+    let space_layout = Rc::new(bempp_distributed_tools::IndexLayout::from_local_counts(
+        space.global_size(),
+        &world,
+    ));
 
-    let point_layout =
-        bempp_distributed_tools::SingleProcessIndexLayout::new(0, quad_degree * n_cells, &world);
+    let point_layout = Rc::new(bempp_distributed_tools::IndexLayout::from_local_counts(
+        quad_degree * n_cells,
+        &world,
+    ));
 
     // Instantiate function spaces.
 
-    let array_function_space = DistributedArrayVectorSpace::<_, f64>::new(&space_layout);
-    let point_function_space = DistributedArrayVectorSpace::<_, f64>::new(&point_layout);
+    let array_function_space =
+        DistributedArrayVectorSpace::<_, f64>::from_index_layout(space_layout.clone());
+    let point_function_space =
+        DistributedArrayVectorSpace::<_, f64>::from_index_layout(point_layout.clone());
 
     let qrule = bempp_quadrature::simplex_rules::simplex_rule_triangle(quad_degree).unwrap();
 
-    let space_to_point = bempp::evaluator_tools::basis_to_point_map(
-        &space,
-        &array_function_space,
-        &point_function_space,
-        &qrule.points,
-        &qrule.weights,
-    );
+    let space_to_point =
+        bempp::evaluator_tools::basis_to_point_map(&space, &qrule.points, &qrule.weights, false);
 
-    let point_to_space = bempp::evaluator_tools::point_to_basis_map(
-        &space,
-        &point_function_space,
-        &array_function_space,
-        &qrule.points,
-        &qrule.weights,
-    );
+    let point_to_space =
+        bempp::evaluator_tools::basis_to_point_map(&space, &qrule.points, &qrule.weights, true);
 
     // We now have to get all the points from the grid. We do this by iterating through all cells.
 
@@ -123,16 +119,15 @@ fn main() {
         1,
         3,
         5,
-        &point_function_space,
-        &point_function_space,
+        point_function_space.clone(),
+        point_function_space.clone(),
     );
 
     let correction = NeighbourEvaluator::new(
         &qrule.points,
         Laplace3dKernel::default(),
         green_kernels::types::GreenKernelEvalType::Value,
-        &point_function_space,
-        &point_function_space,
+        space.support_cells(),
         &grid,
     );
 
@@ -140,20 +135,11 @@ fn main() {
 
     let prod1 = corrected_evaluator.r().product(space_to_point.r());
 
-    let singular_operator = DistributedCsrMatrixOperator::new(
-        assembler.assemble_singular(
-            &space,
-            array_function_space.index_layout(),
-            &space,
-            array_function_space.index_layout(),
-        ),
-        &array_function_space,
-        &array_function_space,
-    );
+    let singular_operator = Operator::from(assembler.assemble_singular(&space, &space));
 
     let laplace_evaluator = (point_to_space.product(prod1)).sum(singular_operator.r());
 
-    let mut x = array_function_space.zero();
+    let mut x = zero_element(array_function_space.clone());
     x.view_mut()
         .local_mut()
         .fill_from_equally_distributed(&mut rng);

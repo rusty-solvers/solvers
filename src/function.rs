@@ -425,7 +425,7 @@ where
                 global_dof_numbers,
                 ownership,
             ),
-            index_layout: IndexLayout::from_local_counts(dofmap_size, comm),
+            index_layout: Rc::new(IndexLayout::from_local_counts(dofmap_size, comm)),
             _marker: PhantomData,
         }
 

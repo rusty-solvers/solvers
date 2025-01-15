@@ -1,8 +1,10 @@
 //! Test the neighbour evaluator
 
+use std::rc::Rc;
+
 use bempp::evaluator_tools::NeighbourEvaluator;
-use bempp_distributed_tools::IndexLayoutFromLocalCounts;
 use green_kernels::laplace_3d::Laplace3dKernel;
+use itertools::Itertools;
 use mpi::traits::Communicator;
 use ndelement::types::ReferenceCellType;
 use ndgrid::{
@@ -12,8 +14,8 @@ use ndgrid::{
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array2, AsApply, Element,
-    IndexLayout, LinearSpace, RandomAccessMut, RawAccess,
+    operator::{interface::DistributedArrayVectorSpace, zero_element},
+    rlst_dynamic_array2, AsApply, Element, IndexLayout, LinearSpace, RandomAccessMut, RawAccess,
 };
 
 fn main() {
@@ -36,16 +38,15 @@ fn main() {
         .filter(|e| matches!(e.ownership(), Ownership::Owned))
         .count();
 
-    let index_layout = IndexLayoutFromLocalCounts::new(n_cells * n_points, &world);
+    let index_layout = Rc::new(IndexLayout::from_local_counts(n_cells * n_points, &world));
 
-    let space = DistributedArrayVectorSpace::<_, f64>::new(&index_layout);
+    let space = DistributedArrayVectorSpace::<_, f64>::from_index_layout(index_layout.clone());
 
     let neighbour_evaluator = NeighbourEvaluator::new(
         points.data(),
         Laplace3dKernel::default(),
         green_kernels::types::GreenKernelEvalType::Value,
-        &space,
-        &space,
+        &(0..grid.entity_count(ReferenceCellType::Triangle)).collect_vec(),
         &grid,
     );
 
@@ -76,11 +77,11 @@ fn main() {
         green_kernels::types::GreenKernelEvalType::Value,
         true,
         Laplace3dKernel::default(),
-        &space,
-        &space,
+        space.clone(),
+        space.clone(),
     );
 
-    let mut x = space.zero();
+    let mut x = zero_element(space.clone());
 
     *x.view_mut().local_mut().get_mut([0]).unwrap() = 1.0;
     *x.view_mut().local_mut().get_mut([1]).unwrap() = 2.0;

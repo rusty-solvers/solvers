@@ -37,7 +37,12 @@ use crate::function::FunctionSpaceTrait;
 
 /// Create a linear operator from the map of a basis to points. The points are sorted by global
 /// index of the corresponding cells.
-pub fn basis_to_point_map<'a, T: RlstScalar + Equivalence, Space: FunctionSpaceTrait<T = T>>(
+pub fn basis_to_point_map<
+    'a,
+    T: RlstScalar + Equivalence,
+    C: Communicator,
+    Space: FunctionSpaceTrait<T = T, C = C>,
+>(
     function_space: &'a Space,
     quadrature_points: &[T::Real],
     quadrature_weights: &[T::Real],
@@ -290,7 +295,9 @@ impl<
         // We now setup the array space. This is a distributed array space with a layout corresponding
         // to the number of points on each process.
 
-        let array_space = Rc::new(IndexLayout::from_local_counts(n_cells * n_points, comm));
+        let array_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
+            IndexLayout::from_local_counts(n_cells * n_points, comm),
+        ));
 
         // We now setup the ghost communicator. The chunk sizes is `n_points` per triangle.
 
@@ -345,7 +352,7 @@ impl<
             self.grid.entity_count(reference_cell) * self.n_points
         );
 
-        let rank = self.domain_space.index_layout().comm().rank() as usize;
+        let rank = self.array_space.index_layout().comm().rank() as usize;
         // We first setup the send data.
 
         let mut send_data =
@@ -358,7 +365,7 @@ impl<
             self.ghost_communicator.send_indices().iter()
         ) {
             let local_start_index = self.global_cell_index_to_owned_active_cell_index
-                [send_global_index]
+                [&send_global_index]
                 * self.n_points;
             let local_end_index = local_start_index + self.n_points;
             send_chunk.copy_from_slice(&x.local().r().data()[local_start_index..local_end_index]);
@@ -393,7 +400,7 @@ impl<
         // We go through the cells, get the global index of the cell, multiply it with `n_points` and
         // use that as global start index for the data in x.
 
-        for &cell in self.active_cells.iter() {
+        for cell in self.active_cells.iter() {
             let x_start = self.global_cell_index_to_active_cell_index[cell] * self.n_points;
             let x_end = x_start + self.n_points;
             out.data_mut()[x_start..x_end].copy_from_slice(&x.local().data()[x_start..x_end]);
@@ -412,8 +419,8 @@ impl<
         write!(
             f,
             "Neighbourhood Evaluator with dimenion [{}, {}].",
-            self.range_space.index_layout().number_of_global_indices(),
-            self.domain_space.index_layout().number_of_global_indices()
+            self.array_space.index_layout().number_of_global_indices(),
+            self.array_space.index_layout().number_of_global_indices()
         )
     }
 }
@@ -431,11 +438,11 @@ impl<
     type Range = DistributedArrayVectorSpace<'a, C, T>;
 
     fn domain(&self) -> Rc<Self::Domain> {
-        self.domain_space.clone()
+        self.array_space.clone()
     }
 
     fn range(&self) -> Rc<Self::Range> {
-        self.range_space.clone()
+        self.array_space.clone()
     }
 }
 
