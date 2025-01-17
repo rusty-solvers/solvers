@@ -77,8 +77,7 @@ fn main() {
         green_kernels::types::GreenKernelEvalType::Value,
         true,
         Laplace3dKernel::default(),
-        space.clone(),
-        space.clone(),
+        &world,
     );
 
     let mut x = zero_element(space.clone());

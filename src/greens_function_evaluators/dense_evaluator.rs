@@ -5,8 +5,8 @@ use std::rc::Rc;
 use green_kernels::{traits::DistributedKernelEvaluator, types::GreenKernelEvalType};
 use mpi::traits::{Communicator, Equivalence};
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, OperatorBase,
-    RawAccess, RawAccessMut, RlstScalar,
+    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, IndexLayout,
+    OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
 
 /// Wrapper for a dense Green's function evaluator.
@@ -54,11 +54,9 @@ where
         eval_mode: GreenKernelEvalType,
         use_multithreaded: bool,
         kernel: K,
-        domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
-        range_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+        comm: &'a C,
     ) -> Self {
         // We want that both layouts have the same communicator.
-        assert!(std::ptr::addr_eq(domain_space.comm(), range_space.comm()));
 
         assert_eq!(
             sources.len() % 3,
@@ -71,23 +69,16 @@ where
             "Target vector length must be a multiple of 3."
         );
 
-        // The length of the source vector must be 3 times the length of the local source indices.
-        assert_eq!(
-            sources.len(),
-            3 * domain_space.index_layout().number_of_local_indices(),
-            "Number of sources ({}) does not match number of local indices ({}).",
-            sources.len() / 3,
-            domain_space.index_layout().number_of_local_indices(),
-        );
+        let n_sources = sources.len() / 3;
+        let n_targets = targets.len() / 3;
 
-        // The length of the target vector must be 3 times the length of the local target indices.
-        assert_eq!(
-            targets.len(),
-            3 * range_space.index_layout().number_of_local_indices(),
-            "Number of targets ({}) does not match number of local indices ({}).",
-            targets.len() / 3,
-            range_space.index_layout().number_of_local_indices(),
-        );
+        let domain_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
+            IndexLayout::from_local_counts(n_sources, comm),
+        ));
+
+        let range_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
+            IndexLayout::from_local_counts(n_targets, comm),
+        ));
 
         Self {
             sources: sources.to_vec(),

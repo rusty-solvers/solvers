@@ -61,8 +61,7 @@ fn main() {
         GreenKernelEvalType::Value,
         false,
         Laplace3dKernel::default(),
-        space.clone(),
-        space.clone(),
+        &world,
     );
 
     // Create the FMM evaluator.
@@ -132,8 +131,7 @@ fn main() {
                 GreenKernelEvalType::Value,
                 false,
                 Laplace3dKernel::default(),
-                space_root.clone(),
-                space_root.clone(),
+                &root_comm,
             );
         let fmm_evaluator_on_root =
             KiFmmEvaluator::new(&gathered_sources, &gathered_targets, 3, 1, 5, &root_comm);
