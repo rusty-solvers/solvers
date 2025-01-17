@@ -352,7 +352,6 @@ impl<
             self.grid.entity_count(reference_cell) * self.n_points
         );
 
-        let rank = self.array_space.index_layout().comm().rank() as usize;
         // We first setup the send data.
 
         let mut send_data =
@@ -456,12 +455,15 @@ where
     GridImpl::LocalGrid: Sync,
     for<'b> <GridImpl::LocalGrid as Grid>::GeometryMap<'b>: Sync,
 {
-    fn apply_extended(
+    fn apply_extended<
+        ContainerIn: rlst::ElementContainer<E = <Self::Domain as rlst::LinearSpace>::E>,
+        ContainerOut: rlst::ElementContainerMut<E = <Self::Range as rlst::LinearSpace>::E>,
+    >(
         &self,
         alpha: <Self::Range as rlst::LinearSpace>::F,
-        x: &<Self::Domain as rlst::LinearSpace>::E,
+        x: Element<ContainerIn>,
         beta: <Self::Range as rlst::LinearSpace>::F,
-        y: &mut <Self::Range as rlst::LinearSpace>::E,
+        mut y: Element<ContainerOut>,
     ) {
         // We need to iterate through the elements.
 
@@ -571,14 +573,5 @@ where
                     );
                 }
             });
-    }
-
-    fn apply(
-        &self,
-        x: &<Self::Domain as rlst::LinearSpace>::E,
-    ) -> <Self::Range as rlst::LinearSpace>::E {
-        let mut y = zero_element(self.range());
-        self.apply_extended(T::one(), x, T::zero(), &mut y);
-        y
     }
 }

@@ -86,8 +86,8 @@ fn main() {
     *x.view_mut().local_mut().get_mut([0]).unwrap() = 1.0;
     *x.view_mut().local_mut().get_mut([1]).unwrap() = 2.0;
 
-    let actual = neighbour_evaluator.apply(&x);
-    let expected = kernel_evaluator.apply(&x);
+    let actual = neighbour_evaluator.apply(x.r());
+    let expected = kernel_evaluator.apply(x.r());
 
     println!("Actual: {}", actual.view().local()[[0]]);
     println!("Expected: {}", expected.view().local()[[0]]);

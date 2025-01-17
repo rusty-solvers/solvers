@@ -67,22 +67,21 @@ fn main() {
 
     // Create the FMM evaluator.
 
-    let fmm_evaluator =
-        KiFmmEvaluator::new(&sources, &targets, 3, 1, 5, space.clone(), space.clone());
+    let fmm_evaluator = KiFmmEvaluator::new(&sources, &targets, 3, 1, 5, &world);
 
     // Apply the dense evaluator.
 
-    let output_dense = dense_evaluator.apply(&charges);
+    let output_dense = dense_evaluator.apply(charges.r());
 
     // Apply the FMM evaluator
 
-    let output_fmm = fmm_evaluator.apply(&charges);
+    let output_fmm = fmm_evaluator.apply(charges.r());
 
     // Compare the results.
 
-    let dense_norm = space.norm(&output_dense);
+    let dense_norm = output_dense.norm();
 
-    let rel_diff = space.norm(&output_dense.clone().sum(&output_fmm.clone().neg())) / dense_norm;
+    let rel_diff = (output_dense.r() - output_fmm.r()).norm() / dense_norm;
 
     if world.rank() == 0 {
         println!("The relative error is: {}", rel_diff);
@@ -136,15 +135,8 @@ fn main() {
                 space_root.clone(),
                 space_root.clone(),
             );
-        let fmm_evaluator_on_root = KiFmmEvaluator::new(
-            &gathered_sources,
-            &gathered_targets,
-            3,
-            1,
-            5,
-            space_root.clone(),
-            space_root.clone(),
-        );
+        let fmm_evaluator_on_root =
+            KiFmmEvaluator::new(&gathered_sources, &gathered_targets, 3, 1, 5, &root_comm);
 
         // Create the charge vector on root.
 
@@ -157,9 +149,9 @@ fn main() {
             .copy_from_slice(gathered_charges.data_mut());
 
         // Now apply the fmm evaluator
-        let fmm_result_on_root = fmm_evaluator_on_root.apply(&charges_on_root);
+        let fmm_result_on_root = fmm_evaluator_on_root.apply(charges_on_root.r());
         // Now apply the dense evaluator
-        let dense_result_on_root = evaluator_dense_on_root.apply(&charges_on_root);
+        let dense_result_on_root = evaluator_dense_on_root.apply(charges_on_root.r());
 
         // Now compare the dense result on root with the global dense result.
 

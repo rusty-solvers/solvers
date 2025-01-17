@@ -4,11 +4,9 @@ use std::rc::Rc;
 
 use green_kernels::{traits::DistributedKernelEvaluator, types::GreenKernelEvalType};
 use mpi::traits::{Communicator, Equivalence};
-use num::One;
 use rlst::{
-    operator::{interface::DistributedArrayVectorSpace, zero_element},
-    rlst_dynamic_array1, AsApply, Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut,
-    RlstScalar,
+    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, OperatorBase,
+    RawAccess, RawAccessMut, RlstScalar,
 };
 
 /// Wrapper for a dense Green's function evaluator.
@@ -126,12 +124,15 @@ impl<C: Communicator, T: RlstScalar + Equivalence, K: DistributedKernelEvaluator
 where
     T::Real: Equivalence,
 {
-    fn apply_extended(
+    fn apply_extended<
+        ContainerIn: rlst::ElementContainer<E = <Self::Domain as rlst::LinearSpace>::E>,
+        ContainerOut: rlst::ElementContainerMut<E = <Self::Range as rlst::LinearSpace>::E>,
+    >(
         &self,
         alpha: <Self::Range as rlst::LinearSpace>::F,
-        x: &<Self::Domain as rlst::LinearSpace>::E,
+        x: rlst::Element<ContainerIn>,
         beta: <Self::Range as rlst::LinearSpace>::F,
-        y: &mut <Self::Range as rlst::LinearSpace>::E,
+        mut y: rlst::Element<ContainerOut>,
     ) {
         y.scale_inplace(beta);
         let mut charges = rlst_dynamic_array1!(
@@ -150,14 +151,5 @@ where
             self.use_multithreaded,
             self.domain_space.comm(), // domain space and range space have the same communicator
         );
-    }
-
-    fn apply(
-        &self,
-        x: &<Self::Domain as rlst::LinearSpace>::E,
-    ) -> <Self::Range as rlst::LinearSpace>::E {
-        let mut y = zero_element(self.range());
-        self.apply_extended(<T as One>::one(), x, T::zero(), &mut y);
-        y
     }
 }

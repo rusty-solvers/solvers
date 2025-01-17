@@ -21,7 +21,10 @@ use kifmm::{
     tree::SortKind,
     ChargeHandler, Evaluate, FftFieldTranslation, KiFmm, KiFmmMulti, MultiNodeBuilder,
 };
-use mpi::traits::{Communicator, Equivalence};
+use mpi::{
+    ffi::MPI_T_ERR_PVAR_NO_STARTSTOP,
+    traits::{Communicator, Equivalence},
+};
 use num::Float;
 use rlst::{
     operator::{interface::DistributedArrayVectorSpace, zero_element},
@@ -77,11 +80,9 @@ where
         local_tree_depth: usize,
         global_tree_depth: usize,
         expansion_order: usize,
-        domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
-        range_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
+        comm: &'a C,
     ) -> Self {
         // We want that both layouts have the same communicator.
-        assert!(std::ptr::addr_eq(domain_space.comm(), range_space.comm()));
 
         assert_eq!(
             sources.len() % 3,
@@ -94,23 +95,16 @@ where
             "Target vector length must be a multiple of 3."
         );
 
-        // The length of the source vector must be 3 times the length of the local source indices.
-        assert_eq!(
-            sources.len(),
-            3 * domain_space.index_layout().number_of_local_indices(),
-            "Number of sources ({}) does not match number of local indices ({}).",
-            sources.len() / 3,
-            domain_space.index_layout().number_of_local_indices(),
-        );
+        let n_sources = sources.len() / 3;
+        let n_targets = targets.len() / 3;
 
-        // The length of the target vector must be 3 times the length of the local target indices.
-        assert_eq!(
-            targets.len(),
-            3 * range_space.index_layout().number_of_local_indices(),
-            "Number of targets ({}) does not match number of local indices ({}).",
-            targets.len() / 3,
-            range_space.index_layout().number_of_local_indices(),
-        );
+        let domain_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
+            IndexLayout::from_local_counts(n_sources, comm),
+        ));
+
+        let range_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
+            IndexLayout::from_local_counts(n_targets, comm),
+        ));
 
         let simple_comm = domain_space.index_layout().comm().duplicate();
         let cell = RefCell::new(
@@ -188,12 +182,15 @@ where
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: DataAccessMulti<Scalar = T>,
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: GhostExchange,
 {
-    fn apply_extended(
+    fn apply_extended<
+        ContainerIn: rlst::ElementContainer<E = <Self::Domain as rlst::LinearSpace>::E>,
+        ContainerOut: rlst::ElementContainerMut<E = <Self::Range as rlst::LinearSpace>::E>,
+    >(
         &self,
         alpha: <Self::Range as rlst::LinearSpace>::F,
-        x: &<Self::Domain as rlst::LinearSpace>::E,
+        x: Element<ContainerIn>,
         beta: <Self::Range as rlst::LinearSpace>::F,
-        y: &mut <Self::Range as rlst::LinearSpace>::E,
+        mut y: Element<ContainerOut>,
     ) {
         let mut x_permuted = rlst_dynamic_array1![T, [self.n_permuted_sources]];
         let mut y_permuted = rlst_dynamic_array1![T, [self.n_permuted_targets]];
@@ -237,14 +234,5 @@ where
         y.scale_inplace(beta);
         // Now add the result.
         y.view_mut().local_mut().sum_into(y_result.r());
-    }
-
-    fn apply(
-        &self,
-        x: &<Self::Domain as rlst::LinearSpace>::E,
-    ) -> <Self::Range as rlst::LinearSpace>::E {
-        let mut y = zero_element(self.range());
-        self.apply_extended(T::one(), x, T::zero(), &mut y);
-        y
     }
 }

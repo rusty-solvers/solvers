@@ -16,12 +16,9 @@ use ndgrid::{
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rlst::{
-    assert_array_relative_eq,
     operator::{interface::DistributedArrayVectorSpace, zero_element, Operator},
-    rlst_dynamic_array1, AsApply, Element, IndexLayout, LinearSpace, MultInto, OperatorBase,
+    rlst_dynamic_array1, AsApply, Element, MultInto, OperatorBase,
 };
-
-use rlst::prelude::*;
 
 fn main() {
     let universe = mpi::initialize().unwrap();
@@ -114,13 +111,7 @@ fn main() {
     // );
 
     let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
-        &points,
-        &points,
-        1,
-        3,
-        5,
-        point_function_space.clone(),
-        point_function_space.clone(),
+        &points, &points, 1, 3, 5, &world,
     );
 
     let correction = NeighbourEvaluator::new(
@@ -144,7 +135,7 @@ fn main() {
         .local_mut()
         .fill_from_equally_distributed(&mut rng);
 
-    let res = laplace_evaluator.apply(&x);
+    let res = laplace_evaluator.apply(x.r());
 
     let res_local = res.view().local();
 
