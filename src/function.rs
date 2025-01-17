@@ -7,10 +7,14 @@ use mpi::traits::{Communicator, Destination, Source};
 use ndelement::ciarlet::CiarletElement;
 use ndelement::traits::ElementFamily;
 use ndelement::{traits::FiniteElement, types::ReferenceCellType};
+use ndgrid::traits::Grid;
 use ndgrid::traits::ParallelGrid;
 use ndgrid::traits::{Entity, Topology};
-use ndgrid::{traits::Grid, types::Ownership};
-use rlst::{IndexLayout, MatrixInverse, RlstScalar};
+use ndgrid::types::Ownership;
+use rlst::{
+    rlst_dynamic_array2, rlst_dynamic_array4, DynamicArray, IndexLayout, MatrixInverse,
+    RawAccessMut, RlstScalar,
+};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -89,6 +93,74 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
 
     /// Return the index layout associated with the function space.
     fn index_layout(&self) -> Rc<IndexLayout<'_, Self::C>>;
+
+    /// Evaluate a function space with a given coefficient vector on all support cells.
+    ///
+    /// The return value is a Hash map that maps from the cell id to a two-dimensional array
+    /// with shape `(value_size, npoints)`, where `value_size` is the number of range components
+    /// of the basis functions and `npoints` is the number of evaluation points.
+    /// The coefficient vector must have the same length as the `local_size` of the function space.
+    fn evaluate(
+        &self,
+        coefficients: &[Self::T],
+        eval_points: &[<Self::T as RlstScalar>::Real],
+    ) -> HashMap<usize, DynamicArray<Self::T, 2>> {
+        // Currently only supports single element grids.
+
+        let tdim = self.grid().topology_dim();
+        assert_eq!(self.grid().entity_types(tdim).len(), 1);
+
+        // Get the number of eval points
+        assert_eq!(eval_points.len() % tdim, 0);
+        let npoints = eval_points.len() / tdim;
+        let eval_points = {
+            let mut tmp = rlst_dynamic_array2!(<Self::T as RlstScalar>::Real, [tdim, npoints]);
+            tmp.data_mut().copy_from_slice(eval_points);
+            tmp
+        };
+
+        let reference_cell = self.grid().entity_types(tdim)[0];
+
+        // Get the finite element of the space
+
+        let element = self.element(reference_cell);
+
+        // And now tabulate the basis functions at the eval points
+
+        let dims = element.tabulate_array_shape(0, npoints);
+        let mut basis_values = rlst_dynamic_array4!(Self::T, dims);
+        element.tabulate(&eval_points, 0, &mut basis_values);
+
+        // We have tabulated the elements. We are going to store the results in a Hashmap.
+        // The keys are the insertion ids of the owned cells on the process. The values
+        // are two-dimensional arrays of dimension (value_size, npoints) where value_size
+        // is the dimension of the range of the basis functions.
+
+        let mut result = HashMap::<usize, DynamicArray<Self::T, 2>>::new();
+
+        for cell_index in self.support_cells() {
+            let cell = self.grid().entity(tdim, *cell_index).unwrap();
+            let cell_dofs = self.cell_dofs(*cell_index).unwrap();
+            // Let's instantiate the result array for the cell.
+            let mut cell_result = rlst_dynamic_array2!(Self::T, [element.value_size(), npoints]);
+            // Now we loop over the basis functions and points and add the contributions to the result.
+
+            for dof in cell_dofs.iter() {
+                for point_index in 0..dims[1] {
+                    for value_index in 0..dims[3] {
+                        for basis_index in 0..dims[2] {
+                            cell_result[[value_index, point_index]] += coefficients[*dof]
+                                * basis_values[[0, point_index, basis_index, value_index]];
+                        }
+                    }
+                }
+            }
+            // Store the result in the HashMap
+            result.insert(cell.id().unwrap(), cell_result);
+        }
+
+        result
+    }
 }
 
 /// Definition of a local function space.
