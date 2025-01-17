@@ -13,7 +13,6 @@ use ndgrid::{traits::Grid, types::Ownership};
 use rlst::{IndexLayout, MatrixInverse, RlstScalar};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::ops::Index;
 use std::rc::Rc;
 
 type DofList = Vec<Vec<usize>>;

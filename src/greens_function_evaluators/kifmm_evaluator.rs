@@ -21,15 +21,11 @@ use kifmm::{
     tree::SortKind,
     ChargeHandler, Evaluate, FftFieldTranslation, KiFmm, KiFmmMulti, MultiNodeBuilder,
 };
-use mpi::{
-    ffi::MPI_T_ERR_PVAR_NO_STARTSTOP,
-    traits::{Communicator, Equivalence},
-};
+use mpi::traits::{Communicator, Equivalence};
 use num::Float;
 use rlst::{
-    operator::{interface::DistributedArrayVectorSpace, zero_element},
-    rlst_dynamic_array1, AsApply, Element, IndexLayout, MatrixSvd, OperatorBase, RawAccess,
-    RawAccessMut, RlstScalar,
+    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, Element,
+    IndexLayout, MatrixSvd, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
 
 /// This structure instantiates an FMM evaluator.

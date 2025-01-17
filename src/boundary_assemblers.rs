@@ -25,9 +25,8 @@ use ndgrid::traits::{Entity, Grid, Topology};
 use ndgrid::types::Ownership;
 use rayon::prelude::*;
 use rlst::{
-    rlst_dynamic_array2, rlst_dynamic_array4, CsrMatrix, DefaultIterator, DistributedCsrMatrix,
-    DynamicArray, IndexLayout, MatrixInverse, RandomAccessMut, RawAccess, RawAccessMut, RlstScalar,
-    Shape,
+    rlst_dynamic_array2, rlst_dynamic_array4, DefaultIterator, DistributedCsrMatrix, DynamicArray,
+    MatrixInverse, RandomAccessMut, RawAccess, RawAccessMut, RlstScalar, Shape,
 };
 use std::collections::HashMap;
 

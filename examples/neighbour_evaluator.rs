@@ -15,7 +15,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rlst::{
     operator::{interface::DistributedArrayVectorSpace, zero_element},
-    rlst_dynamic_array2, AsApply, Element, IndexLayout, LinearSpace, RandomAccessMut, RawAccess,
+    rlst_dynamic_array2, AsApply, IndexLayout, RandomAccessMut, RawAccess,
 };
 
 fn main() {

@@ -1,7 +1,6 @@
 //! Various helper functions to support evaluators.
 
 use std::{
-    cell,
     collections::{HashMap, HashSet},
     marker::PhantomData,
     rc::Rc,
@@ -17,21 +16,21 @@ use ndgrid::{
     types::Ownership,
 };
 
-use rayon::prelude::*;
 use rlst::{
     operator::{
         interface::{
-            distributed_array_vector_space,
             distributed_sparse_operator::DistributedCsrMatrixOperatorImpl,
             DistributedArrayVectorSpace,
         },
-        zero_element, Operator,
+        Operator,
     },
     rlst_array_from_slice2, rlst_dynamic_array1, rlst_dynamic_array2, rlst_dynamic_array3,
     rlst_dynamic_array4, Array, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
     Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar, Shape,
     UnsafeRandomAccessByValue, UnsafeRandomAccessMut,
 };
+
+use rayon::prelude::*;
 
 use crate::function::FunctionSpaceTrait;
 

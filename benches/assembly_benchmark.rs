@@ -5,7 +5,6 @@ use bempp::laplace::assembler::single_layer;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ndelement::ciarlet::LagrangeElementFamily;
 use ndelement::types::{Continuity, ReferenceCellType};
-use rlst::IndexLayout;
 
 pub fn assembly_parts_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("assembly");
@@ -28,7 +27,6 @@ pub fn assembly_parts_benchmark(c: &mut Criterion) {
         options.set_batch_size(128);
 
         let assembler = single_layer(&options);
-        let index_layout = IndexLayout::from_local_counts(space.global_size(), &comm);
 
         group.bench_function(
             format!(
