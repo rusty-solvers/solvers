@@ -100,19 +100,18 @@ fn main() {
         );
     }
 
-    // let kernel_evaluator = bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
-    //     &points,
-    //     &points,
-    //     green_kernels::types::GreenKernelEvalType::Value,
-    //     true,
-    //     Laplace3dKernel::default(),
-    //     &point_function_space,
-    //     &point_function_space,
-    // );
-
-    let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
-        &points, &points, 1, 3, 5, &world,
+    let kernel_evaluator = bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
+        &points,
+        &points,
+        green_kernels::types::GreenKernelEvalType::Value,
+        true,
+        Laplace3dKernel::default(),
+        &world,
     );
+
+    // let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
+    //     &points, &points, 1, 3, 5, &world,
+    // );
 
     let correction = NeighbourEvaluator::new(
         &qrule.points,
