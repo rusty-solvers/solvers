@@ -2,8 +2,9 @@
 
 //mod function_space;
 
+use bempp_distributed_tools::Global2LocalDataMapper;
 use mpi::request::WaitGuard;
-use mpi::traits::{Communicator, Destination, Source};
+use mpi::traits::{Communicator, Destination, Equivalence, Source};
 use ndelement::ciarlet::CiarletElement;
 use ndelement::traits::ElementFamily;
 use ndelement::{traits::FiniteElement, types::ReferenceCellType};
@@ -12,8 +13,8 @@ use ndgrid::traits::ParallelGrid;
 use ndgrid::traits::{Entity, Topology};
 use ndgrid::types::Ownership;
 use rlst::{
-    rlst_dynamic_array2, rlst_dynamic_array4, DynamicArray, IndexLayout, MatrixInverse,
-    RawAccessMut, RlstScalar,
+    rlst_dynamic_array2, rlst_dynamic_array4, DistributedVector, DynamicArray, IndexLayout,
+    MatrixInverse, RawAccess, RawAccessMut, RlstScalar,
 };
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -77,7 +78,12 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
     type C: Communicator;
 
     /// The grid type
-    type Grid: ParallelGrid<Self::C, LocalGrid = Self::LocalGrid>;
+    type ParallelGrid: ParallelGrid<
+        Self::C,
+        LocalGrid = Self::LocalGrid,
+        T = <Self::T as RlstScalar>::Real,
+        EntityDescriptor = ReferenceCellType,
+    >;
     /// Local Function Space
     type LocalFunctionSpace: LocalFunctionSpaceTrait<
         T = Self::T,
@@ -91,6 +97,9 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
     /// Get the local function space
     fn local_space(&self) -> &Self::LocalFunctionSpace;
 
+    /// Return the associated parallel grid
+    fn parallel_grid(&self) -> &Self::ParallelGrid;
+
     /// Return the index layout associated with the function space.
     fn index_layout(&self) -> Rc<IndexLayout<'_, Self::C>>;
 
@@ -102,9 +111,12 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
     /// The coefficient vector must have the same length as the `local_size` of the function space.
     fn evaluate(
         &self,
-        coefficients: &[Self::T],
+        coefficients: &DistributedVector<'_, Self::C, Self::T>,
         eval_points: &[<Self::T as RlstScalar>::Real],
-    ) -> HashMap<usize, DynamicArray<Self::T, 2>> {
+    ) -> HashMap<usize, DynamicArray<Self::T, 2>>
+    where
+        Self::T: Equivalence,
+    {
         // Currently only supports single element grids.
 
         let tdim = self.grid().topology_dim();
@@ -149,7 +161,8 @@ pub trait FunctionSpaceTrait: LocalFunctionSpaceTrait {
                 for point_index in 0..dims[1] {
                     for value_index in 0..dims[3] {
                         for basis_index in 0..dims[2] {
-                            cell_result[[value_index, point_index]] += coefficients[*dof]
+                            cell_result[[value_index, point_index]] += coefficients.local().data()
+                                [*dof]
                                 * basis_values[[0, point_index, basis_index, value_index]];
                         }
                     }
@@ -399,10 +412,12 @@ where
             value
         };
         let mut dof_n = local_offset;
+        let mut number_of_owned_dofs = 0;
         for (i, ownership) in owner_data.iter().enumerate() {
             if ownership.0 == rank as usize {
                 global_dof_numbers[i] = dof_n;
                 dof_n += 1;
+                number_of_owned_dofs += 1;
             } else {
                 ghost_indices[ownership.0].push(i);
                 ghost_dims[ownership.0].push(ownership.1);
@@ -496,7 +511,7 @@ where
                 global_dof_numbers,
                 ownership,
             ),
-            index_layout: Rc::new(IndexLayout::from_local_counts(dofmap_size, comm)),
+            index_layout: Rc::new(IndexLayout::from_local_counts(number_of_owned_dofs, comm)),
             _marker: PhantomData,
         }
 
@@ -586,7 +601,7 @@ impl<
 
     type C = C;
 
-    type Grid = GridImpl;
+    type ParallelGrid = GridImpl;
 
     type LocalFunctionSpace = LocalFunctionSpace<'a, T, GridImpl::LocalGrid>;
 
@@ -596,6 +611,10 @@ impl<
 
     fn index_layout(&self) -> Rc<IndexLayout<'_, Self::C>> {
         self.index_layout.clone()
+    }
+
+    fn parallel_grid(&self) -> &Self::ParallelGrid {
+        self.grid
     }
 }
 
@@ -681,3 +700,25 @@ pub fn assign_dofs<
     }
     (cell_dofs, entity_dofs, size, owner_data)
 }
+
+pub struct SpaceEvaluator<'a, Space: FunctionSpaceTrait> {
+    space: &'a Space,
+    global_to_local_mapper: Global2LocalDataMapper<'a, Space::C>,
+    eval_points: Vec<<Space::T as RlstScalar>::Real>,
+    support_cell_to_position: HashMap<usize, usize>,
+}
+
+// impl<'a, Space: FunctionSpaceTrait> SpaceEvaluator<'a, Space> {
+//     pub fn new(space: &'a Space, eval_points: &[<Space::T as RlstScalar>::Real]) -> Self {
+//         // We need to iterate through and get the ownership and the associated global dof of each dof index.
+
+//         let global_to_local_mapper =
+//             Global2LocalDataMapper::new(space.index_layout(), support_cells);
+//         let eval_points = vec![];
+//         Self {
+//             space,
+//             global_to_local_mapper,
+//             eval_points,
+//         }
+//     }
+// }

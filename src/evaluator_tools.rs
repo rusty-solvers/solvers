@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use bempp_distributed_tools::GhostCommunicator;
+use bempp_distributed_tools::{index_embedding::IndexEmbedding, Global2LocalDataMapper};
 use green_kernels::{traits::Kernel, types::GreenKernelEvalType};
 use itertools::{izip, Itertools};
 use mpi::traits::{Communicator, Equivalence};
@@ -26,7 +26,7 @@ use rlst::{
     },
     rlst_array_from_slice2, rlst_dynamic_array1, rlst_dynamic_array2, rlst_dynamic_array3,
     rlst_dynamic_array4, Array, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
-    Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar, Shape,
+    DynamicArray, Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar, Shape,
     UnsafeRandomAccessByValue, UnsafeRandomAccessMut,
 };
 
@@ -35,7 +35,8 @@ use rayon::prelude::*;
 use crate::function::FunctionSpaceTrait;
 
 /// Create a linear operator from the map of a basis to points. The points are sorted by global
-/// index of the corresponding cells.
+/// index of the corresponding cells in the support. The output space is the space obtained through
+/// the owned support cells on each process.
 pub fn basis_to_point_map<
     'a,
     T: RlstScalar + Equivalence,
@@ -51,7 +52,11 @@ where
     T::Real: Equivalence,
 {
     // Get the grid.
-    let grid = function_space.grid();
+    let grid = function_space.parallel_grid();
+
+    // Get the rank
+
+    let rank = grid.comm().rank();
 
     // Topological dimension of the grid.
     let tdim = grid.topology_dim();
@@ -63,7 +68,7 @@ where
 
     let reference_cell = grid.entity_types(tdim)[0];
 
-    let owned_active_cells: Vec<usize> = function_space
+    let owned_support_cells: Vec<usize> = function_space
         .support_cells()
         .iter()
         .filter(|index| {
@@ -77,7 +82,7 @@ where
         .collect_vec();
 
     // Number of cells. We are only interested in owned cells.
-    let n_cells = owned_active_cells.len();
+    let n_cells = owned_support_cells.len();
 
     // Get the number of quadrature points and check that weights
     // and points have compatible dimensions.
@@ -88,15 +93,21 @@ where
 
     // Assign number of domain and range dofs.
 
-    let n_domain_dofs = function_space.local_size();
     let n_range_dofs = n_cells * n_quadrature_points;
+
+    // Create an index embedding from support cells to all local cells.
+
+    let n_owned_cells = grid
+        .entity_iter(tdim)
+        .filter(|e| matches!(e.ownership(), Ownership::Owned))
+        .count();
+
+    let index_embedding =
+        IndexEmbedding::new(grid.cell_index_layout(), &owned_support_cells, grid.comm());
 
     // Create the index layouts.
 
-    let domain_layout = Rc::new(IndexLayout::from_local_counts(
-        n_domain_dofs,
-        function_space.comm(),
-    ));
+    let domain_layout = function_space.index_layout();
     let range_layout = Rc::new(IndexLayout::from_local_counts(
         n_range_dofs,
         function_space.comm(),
@@ -140,8 +151,15 @@ where
     let mut cols = Vec::<usize>::default();
     let mut data = Vec::<T>::default();
 
-    for cell_index in owned_active_cells.iter() {
-        let cell = grid.entity(tdim, *cell_index).unwrap();
+    for (embedded_index, &cell_index) in owned_support_cells.iter().enumerate() {
+        let cell = grid.entity(tdim, cell_index).unwrap();
+        // We need to get the global embeddeded index of the owned support cell.
+        // First we get the global index of the owned support cell.
+
+        let global_embedded_index = index_embedding
+            .embedded_layout()
+            .local2global(embedded_index)
+            .unwrap();
 
         // Get the Jacobians
         geometry_evaluator.jacobians_dets_normals(
@@ -152,7 +170,7 @@ where
         );
         // Get the global dofs of the cell.
         let global_dofs = function_space
-            .cell_dofs(cell.local_index())
+            .cell_dofs(cell_index)
             .unwrap()
             .iter()
             .map(|local_dof_index| function_space.global_dof_index(*local_dof_index))
@@ -161,7 +179,7 @@ where
         for (qindex, (jdet, qweight)) in izip!(jdets.iter(), quadrature_weights.iter()).enumerate()
         {
             for (i, global_dof) in global_dofs.iter().enumerate() {
-                rows.push(n_quadrature_points * cell.global_index() + qindex);
+                rows.push(n_quadrature_points * global_embedded_index + qindex);
                 cols.push(*global_dof);
                 data.push(T::from_real(jdet * *qweight) * table[[0, qindex, i, 0]]);
             }
@@ -201,12 +219,10 @@ pub struct NeighbourEvaluator<
     eval_type: GreenKernelEvalType,
     array_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
     grid: &'a GridImpl,
-    active_cells: Vec<usize>,
-    owned_active_cells: Vec<usize>,
-    ghost_communicator: GhostCommunicator<usize>,
-    receive_local_indices: Vec<usize>,
-    global_cell_index_to_active_cell_index: HashMap<usize, usize>,
-    global_cell_index_to_owned_active_cell_index: HashMap<usize, usize>,
+    support_cells: Vec<usize>,
+    owned_support_cells: Vec<usize>,
+    global_to_local_mapper: Global2LocalDataMapper<'a, C>,
+    index_embedding: IndexEmbedding<'a, C>,
     _marker: PhantomData<C>,
 }
 
@@ -223,7 +239,7 @@ impl<
         eval_points: &[T::Real],
         kernel: K,
         eval_type: GreenKernelEvalType,
-        active_cells: &[usize],
+        support_cells: &[usize],
         grid: &'a GridImpl,
     ) -> Self {
         let tdim = grid.topology_dim();
@@ -235,86 +251,75 @@ impl<
 
         assert_eq!(grid.entity_types(tdim).len(), 1);
 
+        let reference_cell = grid.entity_types(tdim)[0];
+
         // Get the number of points
         assert_eq!(eval_points.len() % tdim, 0);
         let n_points = eval_points.len() / tdim;
 
-        // The active cells are those that we need to iterate over.
-        // We need all active cells (including non-owned) and the
-        // owned active cells.
+        // The active cells are all relevant cells on a process,
+        // typically the support of a function space.
 
-        let active_cells = active_cells
+        // The owned active cells provide the relevant dofs.
+
+        // The operator gets the relevant dofs for the owned active cells
+        // and then needs to communicate for the rest of the active cells
+        // the data from the other processes.
+
+        let support_cells = support_cells
             .iter()
             .copied()
             .sorted_by_key(|&index| grid.entity(tdim, index).unwrap().global_index())
             .collect_vec();
 
-        let owned_active_cells: Vec<usize> = active_cells
+        let support_cell_owners = support_cells
             .iter()
-            .filter(|index| {
+            .map(|index| {
+                if let Ownership::Ghost(owner, _) = grid.entity(tdim, *index).unwrap().ownership() {
+                    owner
+                } else {
+                    comm.rank() as usize
+                }
+            })
+            .collect_vec();
+
+        let owned_support_cells: Vec<usize> = support_cells
+            .iter()
+            .filter(|cell_index| {
                 matches!(
-                    grid.entity(tdim, **index).unwrap().ownership(),
+                    grid.entity(tdim, **cell_index).unwrap().ownership(),
                     Ownership::Owned
                 )
             })
             .copied()
             .collect_vec();
 
-        let n_cells = owned_active_cells.len();
+        // The data will be coming in with respect to owned support cells. However, to make data distribution
+        // easier we embed the owned support cells into the set of all owned cells.
 
-        // We now need to setup the ghost communicator structure. When cells are a target that interface process
-        // boundaries, their sources are on another process, hence need ghost communicators to get the data.
+        let index_embedding =
+            IndexEmbedding::new(grid.cell_index_layout(), &owned_support_cells, grid.comm());
 
-        // This map stores the local index associated with a global index.
-        let mut global_cell_index_to_active_cell_index = HashMap::<usize, usize>::default();
-
-        // We iterate through the cells to figure out ghost cells and their originating ranks.
-        let mut ghost_global_indices: Vec<usize> = Vec::new();
-        let mut ghost_ranks: Vec<usize> = Vec::new();
-
-        for (active_index, cell_index) in active_cells.iter().enumerate() {
-            let cell = grid.entity(tdim, *cell_index).unwrap();
-            // This maps each active cell to a local index in order.
-            global_cell_index_to_active_cell_index.insert(cell.global_index(), active_index);
-            if let Ownership::Ghost(owning_rank, _) = cell.ownership() {
-                ghost_global_indices.push(cell.global_index());
-                ghost_ranks.push(owning_rank);
-            }
-        }
-
-        // We also want to create a map from global cell indices to owned active cell indices.
-        let mut global_cell_index_to_owned_active_cell_index = HashMap::<usize, usize>::default();
-
-        for (owned_active_index, &cell_index) in owned_active_cells.iter().enumerate() {
-            let cell = grid.entity(tdim, cell_index).unwrap();
-            global_cell_index_to_owned_active_cell_index
-                .insert(cell.global_index(), owned_active_index);
-        }
+        let n_owned_support_cells = owned_support_cells.len();
 
         // We now setup the array space. This is a distributed array space with a layout corresponding
         // to the number of points on each process.
 
         let array_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
-            IndexLayout::from_local_counts(n_cells * n_points, comm),
+            IndexLayout::from_local_counts(n_owned_support_cells * n_points, comm),
         ));
 
-        // We now setup the ghost communicator. The chunk sizes is `n_points` per triangle.
+        // We now setup the data mapper with respect to all owned cells on each process.
 
-        let ghost_communicator = GhostCommunicator::new(
-            // This is the actual global ghost indices.
-            &ghost_global_indices,
-            &ghost_ranks,
-            comm,
+        let global_to_local_mapper = Global2LocalDataMapper::new(
+            grid.cell_index_layout(),
+            &support_cells
+                .iter()
+                .map(|index| grid.entity(tdim, *index).unwrap().global_index())
+                .collect_vec(),
         );
 
-        // We now need to get the local indices of the receive values too. The ghost communicator
-        // only stores global indices.
-
-        let receive_local_indices = ghost_communicator
-            .receive_indices()
-            .iter()
-            .map(|global_index| global_cell_index_to_active_cell_index[global_index])
-            .collect_vec();
+        // Finally, we need a map that tells us for each support cell index what the corresponding position in the `support_cells` vector is.
 
         Self {
             eval_points: eval_points.to_vec(),
@@ -323,86 +328,33 @@ impl<
             eval_type,
             array_space,
             grid,
-            active_cells,
-            owned_active_cells,
-            ghost_communicator,
-            receive_local_indices,
-            global_cell_index_to_active_cell_index,
-            global_cell_index_to_owned_active_cell_index,
+            support_cells,
+            owned_support_cells,
+            global_to_local_mapper,
+            index_embedding,
             _marker: PhantomData,
         }
     }
 
-    fn communicate_dofs<
-        ArrayImpl: UnsafeRandomAccessByValue<1, Item = T>
-            + Shape<1>
-            + UnsafeRandomAccessMut<1, Item = T>
-            + RawAccessMut<Item = T>,
-    >(
-        &self,
-        x: &DistributedVector<'_, C, T>,
-        mut out: Array<T, ArrayImpl, 1>,
-    ) {
-        let tdim = self.grid.topology_dim();
-        let reference_cell = self.grid.entity_types(tdim)[0];
-        // Check that `out` has the correct size. It must be n_points * the number of cells in the grid.
-        assert_eq!(
-            out.shape()[0],
-            self.grid.entity_count(reference_cell) * self.n_points
-        );
+    fn communicate_dofs(&self, x: &DistributedVector<'_, C, T>) -> Vec<T> {
+        // The data vector x has dofs associated with the owned support cells.
+        // We embed this data into a larger vector associated with all owned cells
+        // and then map this vector globally across all processes to the active cells
+        // on each process.
 
-        // We first setup the send data.
+        let mut all_cells_vec = vec![
+            T::zero();
+            self.grid.cell_index_layout().number_of_local_indices()
+                * self.n_points
+        ];
 
-        let mut send_data =
-            vec![T::zero(); self.ghost_communicator.total_send_count() * self.n_points];
+        self.index_embedding
+            .embed_data(x.local().data(), &mut all_cells_vec, self.n_points);
 
-        // We now need to fill the send data with the values of the local dofs.
+        // We can now communicate the data. The returned data is the data for all support cells on each process.
 
-        for (send_chunk, &send_global_index) in izip!(
-            send_data.chunks_mut(self.n_points),
-            self.ghost_communicator.send_indices().iter()
-        ) {
-            let local_start_index = self.global_cell_index_to_owned_active_cell_index
-                [&send_global_index]
-                * self.n_points;
-            let local_end_index = local_start_index + self.n_points;
-            send_chunk.copy_from_slice(&x.local().r().data()[local_start_index..local_end_index]);
-        }
-
-        // We need an array for the receive data.
-
-        let mut receive_data =
-            vec![T::zero(); self.ghost_communicator.total_receive_count() * self.n_points];
-
-        // Now we need to communicate the data.
-
-        self.ghost_communicator.forward_send_values_by_chunks(
-            send_data.as_slice(),
-            &mut receive_data,
-            self.n_points,
-        );
-
-        // We have done the ghost exchange. Now we build the local vector of dofs. Each chunk of n_points corresponds
-        // to one local index.
-
-        for (receive_chunk, &receive_local_index) in izip!(
-            receive_data.chunks(self.n_points),
-            self.receive_local_indices.iter(),
-        ) {
-            let local_start_index = receive_local_index * self.n_points;
-            let local_end_index = local_start_index + self.n_points;
-            out.data_mut()[local_start_index..local_end_index].copy_from_slice(receive_chunk);
-        }
-
-        // After filling the ghost data we need to fill the local data in the right cell order.
-        // We go through the cells, get the global index of the cell, multiply it with `n_points` and
-        // use that as global start index for the data in x.
-
-        for cell in self.active_cells.iter() {
-            let x_start = self.global_cell_index_to_active_cell_index[cell] * self.n_points;
-            let x_end = x_start + self.n_points;
-            out.data_mut()[x_start..x_end].copy_from_slice(&x.local().data()[x_start..x_end]);
-        }
+        self.global_to_local_mapper
+            .map_data(x.local().data(), self.n_points)
     }
 }
 
@@ -479,16 +431,9 @@ where
         // We need the reference cell
         let reference_cell = self.grid.entity_types(tdim)[0];
 
-        // Let's get the number of cells on this rank. This includes local and ghost cells.
-        // This is different from `n_cells` in `new` which only counts owned cells.
-        let n_cells = self.active_cells.len();
+        // We now need to communicate the data. The `charges` vector contains all charges for the active cells on this process.
 
-        // Let us allocate space for the local charges. Each chunk of charges is associated with a cell.
-        let mut charges = rlst_dynamic_array1![T, [n_cells * n_points]];
-
-        // We now need to communicate the data.
-
-        self.communicate_dofs(x.view(), charges.r_mut());
+        let charges = self.communicate_dofs(x.view());
 
         // The `charges` vector now has all the charges for each cell on our process, including ghost cells.
         // Next we iterate through the targets from the active cells and evaluate the kernel with sources coming
@@ -499,20 +444,20 @@ where
         // already by global index.
 
         let local_grid = self.grid.local_grid();
-        let active_cells: HashSet<usize> =
-            HashSet::from_iter(self.active_cells.as_slice().iter().copied());
-        let owned_active_cells = self.owned_active_cells.as_slice();
+        let support_cells: HashSet<usize> =
+            HashSet::from_iter(self.support_cells.as_slice().iter().copied());
+        let owned_support_cells = self.owned_support_cells.as_slice();
         let eval_points = self.eval_points.as_slice();
         let geometry_map = local_grid.geometry_map(reference_cell, eval_points);
         let kernel = &self.kernel;
         let eval_type = self.eval_type;
-        let global_to_active_index = &self.global_cell_index_to_active_cell_index;
+        let dof_to_position_map = &self.global_to_local_mapper.dof_to_position_map();
 
         y.view_mut()
             .local_mut()
             .data_mut()
             .par_chunks_mut(target_chunk_size)
-            .zip(owned_active_cells)
+            .zip(owned_support_cells)
             .for_each(|(result_chunk, &owned_target_cell_index)| {
                 let cell_entity = local_grid.entity(tdim, owned_target_cell_index).unwrap();
 
@@ -535,7 +480,7 @@ where
                             .connected_entity_iter(tdim)
                             .collect_vec()
                     })
-                    .filter(|&cell| active_cells.contains(&cell))
+                    .filter(|&cell| support_cells.contains(&cell))
                     .unique()
                     .collect_vec();
 
@@ -553,11 +498,11 @@ where
                     // Get the points of the other cell.
                     geometry_map.points(source_cell, source_points.data_mut());
                     // Now get the right charges.
-                    let charge_start = global_to_active_index[&source_cell] * n_points;
+                    let charge_start = dof_to_position_map[&source_cell] * n_points;
                     let charge_end = charge_start + n_points;
                     source_charges
                         .data_mut()
-                        .copy_from_slice(&charges.data()[charge_start..charge_end]);
+                        .copy_from_slice(&charges[charge_start..charge_end]);
                     // We need to multiply the source charges with alpha
                     source_charges.scale_inplace(alpha);
 

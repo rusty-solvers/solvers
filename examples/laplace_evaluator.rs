@@ -37,7 +37,7 @@ fn main() {
 
     let space = bempp::function::FunctionSpace::new(
         &grid,
-        &LagrangeElementFamily::<f64>::new(0, ndelement::types::Continuity::Discontinuous),
+        &LagrangeElementFamily::<f64>::new(1, ndelement::types::Continuity::Discontinuous),
     );
 
     let mut options = BoundaryAssemblerOptions::default();
