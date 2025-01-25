@@ -129,7 +129,10 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
         Space::LocalFunctionSpace: Sync,
         T: Equivalence,
     {
-        let shape = [test_space.global_size(), trial_space.global_size()];
+        let shape = [
+            test_space.local_space().global_size(),
+            trial_space.local_space().global_size(),
+        ];
         let sparse_matrix =
             self.assemble_singular_part(shape, trial_space.local_space(), test_space.local_space());
 
@@ -157,8 +160,13 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
             panic!("Dense assembly can only be used for function spaces stored in serial");
         }
 
-        let mut output =
-            rlst_dynamic_array2!(T, [test_space.global_size(), trial_space.global_size()]);
+        let mut output = rlst_dynamic_array2!(
+            T,
+            [
+                test_space.local_space().global_size(),
+                trial_space.local_space().global_size()
+            ]
+        );
 
         self.assemble_into_memory(trial_space, test_space, output.data_mut());
 
@@ -176,15 +184,18 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
     {
         assert_eq!(
             output.len(),
-            test_space.global_size() * trial_space.global_size()
+            test_space.local_space().global_size() * trial_space.local_space().global_size()
         );
         if trial_space.comm().size() > 1 || test_space.comm().size() > 1 {
             panic!("Dense assembly can only be used for function spaces stored in serial");
         }
 
-        let test_colouring = test_space.cell_colouring();
-        let trial_colouring = trial_space.cell_colouring();
-        let shape = [test_space.global_size(), trial_space.global_size()];
+        let test_colouring = test_space.local_space().cell_colouring();
+        let trial_colouring = trial_space.local_space().cell_colouring();
+        let shape = [
+            test_space.local_space().global_size(),
+            trial_space.local_space().global_size(),
+        ];
         let output_raw = RawData2D {
             data: output.as_mut_ptr(),
             shape,

@@ -27,7 +27,7 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 bempp-quadrature = { version = "0.1.0" }
 itertools = "0.13.*"
-mpi = { version = "0.8.*"}
+mpi = { version = "0.8.*", features = ["complex"]}
 num = "0.4"
 ndelement = { git="https://github.com/bempp/ndelement.git", features = ["mpi"]}
 # ndelement = { path = "../ndelement", features = ["mpi"] }

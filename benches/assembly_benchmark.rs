@@ -1,5 +1,6 @@
 use bempp::boundary_assemblers::BoundaryAssemblerOptions;
 use bempp::function::FunctionSpace;
+use bempp::function::FunctionSpaceTrait;
 use bempp::function::LocalFunctionSpaceTrait;
 use bempp::laplace::assembler::single_layer;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -31,8 +32,8 @@ pub fn assembly_parts_benchmark(c: &mut Criterion) {
         group.bench_function(
             format!(
                 "Assembly of singular terms of {}x{} matrix",
-                space.global_size(),
-                space.global_size()
+                space.local_space().global_size(),
+                space.local_space().global_size()
             ),
             |b| b.iter(|| black_box(assembler.assemble_singular(&space, &space))),
         );

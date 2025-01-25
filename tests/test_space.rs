@@ -1,4 +1,4 @@
-use bempp::function::{assign_dofs, FunctionSpace, LocalFunctionSpaceTrait};
+use bempp::function::{assign_dofs, FunctionSpace, FunctionSpaceTrait, LocalFunctionSpaceTrait};
 use bempp::shapes::{regular_sphere, screen_triangles};
 use mpi::traits::Communicator;
 use ndelement::ciarlet::{LagrangeElementFamily, RaviartThomasElementFamily};
@@ -14,15 +14,12 @@ static MPI_UNIVERSE: LazyLock<Universe> = std::sync::LazyLock::new(|| {
         .0
 });
 
-fn run_test<
-    C: Communicator,
-    GridImpl: ParallelGrid<C, T = f64, EntityDescriptor = ReferenceCellType>,
->(
+fn run_test<C: Communicator, GridImpl: ParallelGrid<C = C, T = f64>>(
     grid: &GridImpl,
     degree: usize,
     continuity: Continuity,
 ) where
-    GridImpl::LocalGrid: Sync,
+    GridImpl::LocalGrid: Grid<EntityDescriptor = ReferenceCellType> + Sync,
 {
     let family = LagrangeElementFamily::<f64>::new(degree, continuity);
     let (cell_dofs, entity_dofs, size, owner_data) = assign_dofs(0, grid.local_grid(), &family);
@@ -47,15 +44,12 @@ fn run_test<
     }
 }
 
-fn run_test_rt<
-    C: Communicator,
-    GridImpl: ParallelGrid<C, T = f64, EntityDescriptor = ReferenceCellType>,
->(
+fn run_test_rt<C: Communicator, GridImpl: ParallelGrid<C = C, T = f64>>(
     grid: &GridImpl,
     degree: usize,
     continuity: Continuity,
 ) where
-    GridImpl::LocalGrid: Sync,
+    GridImpl::LocalGrid: Grid<EntityDescriptor = ReferenceCellType> + Sync,
 {
     let family = RaviartThomasElementFamily::<f64>::new(degree, continuity);
     let (cell_dofs, entity_dofs, size, owner_data) = assign_dofs(0, grid.local_grid(), &family);
@@ -153,10 +147,13 @@ fn test_dofmap_lagrange0() {
     //let grid = regular_sphere::<f64, _>(2, 1, &comm);
     let element = LagrangeElementFamily::<f64>::new(0, Continuity::Discontinuous);
     let space = FunctionSpace::new(&grid, &element);
-    assert_eq!(space.local_size(), space.global_size());
     assert_eq!(
-        space.local_size(),
-        grid.entity_count(ReferenceCellType::Triangle)
+        space.local_space().local_size(),
+        space.local_space().global_size()
+    );
+    assert_eq!(
+        space.local_space().local_size(),
+        grid.local_grid().entity_count(ReferenceCellType::Triangle)
     );
 }
 
@@ -167,10 +164,13 @@ fn test_dofmap_lagrange1() {
     let grid = regular_sphere::<f64, _>(2, 1, &comm);
     let element = LagrangeElementFamily::<f64>::new(1, Continuity::Standard);
     let space = FunctionSpace::new(&grid, &element);
-    assert_eq!(space.local_size(), space.global_size());
     assert_eq!(
-        space.local_size(),
-        grid.entity_count(ReferenceCellType::Point)
+        space.local_space().local_size(),
+        space.local_space().global_size()
+    );
+    assert_eq!(
+        space.local_space().local_size(),
+        grid.local_grid().entity_count(ReferenceCellType::Point)
     );
 }
 
@@ -181,11 +181,14 @@ fn test_dofmap_lagrange2() {
     let grid = regular_sphere::<f64, _>(2, 1, &comm);
     let element = LagrangeElementFamily::<f64>::new(2, Continuity::Standard);
     let space = FunctionSpace::new(&grid, &element);
-    assert_eq!(space.local_size(), space.global_size());
     assert_eq!(
-        space.local_size(),
-        grid.entity_count(ReferenceCellType::Point)
-            + grid.entity_count(ReferenceCellType::Interval)
+        space.local_space().local_size(),
+        space.local_space().global_size()
+    );
+    assert_eq!(
+        space.local_space().local_size(),
+        grid.local_grid().entity_count(ReferenceCellType::Point)
+            + grid.local_grid().entity_count(ReferenceCellType::Interval)
     );
 }
 
@@ -196,13 +199,16 @@ fn test_colouring_p1() {
     let grid = regular_sphere::<f64, _>(2, 1, &comm);
     let element = LagrangeElementFamily::<f64>::new(1, Continuity::Standard);
     let space = FunctionSpace::new(&grid, &element);
-    let colouring = &space.cell_colouring()[&ReferenceCellType::Triangle];
-    let cells = grid.entity_iter(2).collect::<Vec<_>>();
+    let colouring = &space.local_space().cell_colouring()[&ReferenceCellType::Triangle];
+    let cells = grid.local_grid().entity_iter(2).collect::<Vec<_>>();
     let mut n = 0;
     for i in colouring {
         n += i.len()
     }
-    assert_eq!(n, grid.entity_count(ReferenceCellType::Triangle));
+    assert_eq!(
+        n,
+        grid.local_grid().entity_count(ReferenceCellType::Triangle)
+    );
     for (i, ci) in colouring.iter().enumerate() {
         for (j, cj) in colouring.iter().enumerate() {
             if i != j {
@@ -236,12 +242,15 @@ fn test_colouring_dp0() {
     let grid = regular_sphere::<f64, _>(2, 1, &comm);
     let element = LagrangeElementFamily::<f64>::new(0, Continuity::Discontinuous);
     let space = FunctionSpace::new(&grid, &element);
-    let colouring = &space.cell_colouring()[&ReferenceCellType::Triangle];
+    let colouring = &space.local_space().cell_colouring()[&ReferenceCellType::Triangle];
     let mut n = 0;
     for i in colouring {
         n += i.len()
     }
-    assert_eq!(n, grid.entity_count(ReferenceCellType::Triangle));
+    assert_eq!(
+        n,
+        grid.local_grid().entity_count(ReferenceCellType::Triangle)
+    );
     for (i, ci) in colouring.iter().enumerate() {
         for (j, cj) in colouring.iter().enumerate() {
             if i != j {
@@ -263,12 +272,15 @@ fn test_colouring_rt1() {
     let grid = regular_sphere::<f64, _>(2, 1, &comm);
     let element = LagrangeElementFamily::<f64>::new(1, Continuity::Standard);
     let space = FunctionSpace::new(&grid, &element);
-    let colouring = &space.cell_colouring()[&ReferenceCellType::Triangle];
+    let colouring = &space.local_space().cell_colouring()[&ReferenceCellType::Triangle];
     let mut n = 0;
     for i in colouring {
         n += i.len()
     }
-    assert_eq!(n, grid.entity_count(ReferenceCellType::Triangle));
+    assert_eq!(
+        n,
+        grid.local_grid().entity_count(ReferenceCellType::Triangle)
+    );
     for (i, ci) in colouring.iter().enumerate() {
         for (j, cj) in colouring.iter().enumerate() {
             if i != j {
@@ -285,12 +297,14 @@ fn test_colouring_rt1() {
             for cell1 in ci {
                 if cell0 != cell1 {
                     for e0 in grid
+                        .local_grid()
                         .entity(2, *cell0)
                         .unwrap()
                         .topology()
                         .sub_entity_iter(1)
                     {
                         for e1 in grid
+                            .local_grid()
                             .entity(2, *cell1)
                             .unwrap()
                             .topology()

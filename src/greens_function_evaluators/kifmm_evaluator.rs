@@ -103,19 +103,31 @@ where
         ));
 
         let simple_comm = domain_space.index_layout().comm().duplicate();
+
+        let builder = MultiNodeBuilder::new(false)
+            .tree(
+                &simple_comm,
+                sources,
+                targets,
+                local_tree_depth as u64,
+                global_tree_depth as u64,
+                true,
+                SortKind::Samplesort { n_samples: 100 },
+            )
+            .unwrap();
+
+        let n_sources = builder
+            .tree
+            .as_ref()
+            .unwrap()
+            .source_tree
+            .global_indices
+            .len();
+
         let cell = RefCell::new(
-            MultiNodeBuilder::new(false)
-                .tree(
-                    &simple_comm,
-                    sources,
-                    targets,
-                    local_tree_depth as u64,
-                    global_tree_depth as u64,
-                    true,
-                    SortKind::Samplesort { n_samples: 100 },
-                )
-                .unwrap()
+            builder
                 .parameters(
+                    &vec![T::zero(); n_sources],
                     expansion_order,
                     Laplace3dKernel::<T::Real>::default(),
                     FftFieldTranslation::<T>::new(None),

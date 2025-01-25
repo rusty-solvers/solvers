@@ -3,14 +3,15 @@
 use std::rc::Rc;
 
 use bempp::{
-    boundary_assemblers::BoundaryAssemblerOptions, evaluator_tools::NeighbourEvaluator,
-    function::LocalFunctionSpaceTrait,
+    boundary_assemblers::BoundaryAssemblerOptions,
+    evaluator_tools::NeighbourEvaluator,
+    function::{FunctionSpaceTrait, LocalFunctionSpaceTrait},
 };
 use green_kernels::laplace_3d::Laplace3dKernel;
 use mpi::traits::Communicator;
 use ndelement::{ciarlet::LagrangeElementFamily, types::ReferenceCellType};
 use ndgrid::{
-    traits::{Entity, GeometryMap, Grid},
+    traits::{Entity, GeometryMap, Grid, ParallelGrid},
     types::Ownership,
 };
 use rand::SeedableRng;
@@ -31,7 +32,7 @@ fn main() {
     let quad_degree = 6;
     // Get the number of cells in the grid.
 
-    let n_cells = grid.entity_iter(2).count();
+    let n_cells = grid.local_grid().entity_iter(2).count();
 
     println!("Number of cells: {}", n_cells);
 
@@ -56,7 +57,7 @@ fn main() {
     //First initialise the index layouts.
 
     let space_layout = Rc::new(bempp_distributed_tools::IndexLayout::from_local_counts(
-        space.global_size(),
+        space.local_space().global_size(),
         &world,
     ));
 
@@ -84,9 +85,12 @@ fn main() {
 
     let mut points = vec![0 as f64; 3 * quad_degree * n_cells];
 
-    let geometry_map = grid.geometry_map(ReferenceCellType::Triangle, &qrule.points);
+    let geometry_map = grid
+        .local_grid()
+        .geometry_map(ReferenceCellType::Triangle, &qrule.points);
 
     for cell in grid
+        .local_grid()
         .entity_iter(2)
         .filter(|e| matches!(e.ownership(), Ownership::Owned))
     {
@@ -100,24 +104,24 @@ fn main() {
         );
     }
 
-    let kernel_evaluator = bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
-        &points,
-        &points,
-        green_kernels::types::GreenKernelEvalType::Value,
-        true,
-        Laplace3dKernel::default(),
-        &world,
-    );
-
-    // let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
-    //     &points, &points, 1, 3, 5, &world,
+    // let kernel_evaluator = bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
+    //     &points,
+    //     &points,
+    //     green_kernels::types::GreenKernelEvalType::Value,
+    //     true,
+    //     Laplace3dKernel::default(),
+    //     &world,
     // );
+
+    let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
+        &points, &points, 1, 3, 5, &world,
+    );
 
     let correction = NeighbourEvaluator::new(
         &qrule.points,
         Laplace3dKernel::default(),
         green_kernels::types::GreenKernelEvalType::Value,
-        space.support_cells(),
+        space.local_space().support_cells(),
         &grid,
     );
 
@@ -138,7 +142,7 @@ fn main() {
 
     let res_local = res.view().local();
 
-    let mut expected = rlst_dynamic_array1!(f64, [space.global_size()]);
+    let mut expected = rlst_dynamic_array1!(f64, [space.local_space().global_size()]);
 
     expected
         .r_mut()

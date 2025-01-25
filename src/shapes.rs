@@ -7,7 +7,7 @@ use ndelement::{ciarlet::CiarletElement, types::ReferenceCellType};
 use ndgrid::{
     traits::{Builder, ParallelBuilder},
     types::RealScalar,
-    ParallelGrid, SingleElementGrid, SingleElementGridBuilder,
+    ParallelGridImpl, SingleElementGrid, SingleElementGridBuilder,
 };
 use num::Float;
 
@@ -20,7 +20,7 @@ pub fn regular_sphere<T: RealScalar + Equivalence, C: Communicator>(
     refinement_level: u32,
     degree: usize,
     comm: &C,
-) -> ParallelGrid<C, SingleElementGrid<T, CiarletElement<T>>> {
+) -> ParallelGridImpl<C, SingleElementGrid<T, CiarletElement<T>>> {
     if comm.rank() == 0 {
         let mut b = SingleElementGridBuilder::new_with_capacity(
             3,
@@ -120,7 +120,7 @@ pub fn regular_sphere<T: RealScalar + Equivalence, C: Communicator>(
 pub fn screen_triangles<T: RealScalar + Equivalence, C: Communicator>(
     ncells: usize,
     comm: &C,
-) -> ParallelGrid<C, SingleElementGrid<T, CiarletElement<T>>> {
+) -> ParallelGridImpl<C, SingleElementGrid<T, CiarletElement<T>>> {
     if ncells == 0 {
         panic!("Cannot create a grid with 0 cells");
     }
@@ -178,7 +178,7 @@ pub fn screen_triangles<T: RealScalar + Equivalence, C: Communicator>(
 pub fn screen_quadrilaterals<T: RealScalar + Equivalence, C: Communicator>(
     ncells: usize,
     comm: &C,
-) -> ParallelGrid<C, SingleElementGrid<T, CiarletElement<T>>> {
+) -> ParallelGridImpl<C, SingleElementGrid<T, CiarletElement<T>>> {
     if ncells == 0 {
         panic!("Cannot create a grid with 0 cells");
     }

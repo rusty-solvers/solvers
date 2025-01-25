@@ -1,10 +1,6 @@
 //! Various helper functions to support evaluators.
 
-use std::{
-    collections::{HashMap, HashSet},
-    marker::PhantomData,
-    rc::Rc,
-};
+use std::{collections::HashSet, marker::PhantomData, rc::Rc};
 
 use bempp_distributed_tools::{index_embedding::IndexEmbedding, Global2LocalDataMapper};
 use green_kernels::{traits::Kernel, types::GreenKernelEvalType};
@@ -25,14 +21,13 @@ use rlst::{
         Operator,
     },
     rlst_array_from_slice2, rlst_dynamic_array1, rlst_dynamic_array2, rlst_dynamic_array3,
-    rlst_dynamic_array4, Array, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
-    DynamicArray, Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar, Shape,
-    UnsafeRandomAccessByValue, UnsafeRandomAccessMut,
+    rlst_dynamic_array4, AsApply, DefaultIterator, DistributedCsrMatrix, DistributedVector,
+    Element, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
 
 use rayon::prelude::*;
 
-use crate::function::FunctionSpaceTrait;
+use crate::function::{FunctionSpaceTrait, LocalFunctionSpaceTrait};
 
 /// Create a linear operator from the map of a basis to points. The points are sorted by global
 /// index of the corresponding cells in the support. The output space is the space obtained through
@@ -52,33 +47,31 @@ where
     T::Real: Equivalence,
 {
     // Get the grid.
-    let grid = function_space.parallel_grid();
+    let grid = function_space.grid();
 
     // Get the rank
 
-    let rank = grid.comm().rank();
-
     // Topological dimension of the grid.
-    let tdim = grid.topology_dim();
+    let tdim = grid.local_grid().topology_dim();
 
     // The method is currently restricted to single element type grids.
     // So let's make sure that this is the case.
 
-    assert_eq!(grid.entity_types(tdim).len(), 1);
+    assert_eq!(grid.local_grid().entity_types(tdim).len(), 1);
 
-    let reference_cell = grid.entity_types(tdim)[0];
+    let reference_cell = grid.local_grid().entity_types(tdim)[0];
 
     let owned_support_cells: Vec<usize> = function_space
+        .local_space()
         .support_cells()
         .iter()
         .filter(|index| {
             matches!(
-                grid.entity(tdim, **index).unwrap().ownership(),
+                grid.local_grid().entity(tdim, **index).unwrap().ownership(),
                 Ownership::Owned
             )
         })
         .copied()
-        .sorted_by_key(|&index| grid.entity(tdim, index).unwrap().global_index())
         .collect_vec();
 
     // Number of cells. We are only interested in owned cells.
@@ -97,13 +90,8 @@ where
 
     // Create an index embedding from support cells to all local cells.
 
-    let n_owned_cells = grid
-        .entity_iter(tdim)
-        .filter(|e| matches!(e.ownership(), Ownership::Owned))
-        .count();
-
     let index_embedding =
-        IndexEmbedding::new(grid.cell_index_layout(), &owned_support_cells, grid.comm());
+        IndexEmbedding::new(grid.cell_layout(), &owned_support_cells, grid.comm());
 
     // Create the index layouts.
 
@@ -125,24 +113,33 @@ where
     let mut table = rlst_dynamic_array4!(
         T,
         function_space
+            .local_space()
             .element(reference_cell)
             .tabulate_array_shape(0, n_quadrature_points)
     );
     function_space
+        .local_space()
         .element(reference_cell)
         .tabulate(&quadrature_points, 0, &mut table);
 
     // We have tabulated the basis functions on the reference element. Now need
     // the map to physical elements.
 
-    let geometry_evaluator = grid.geometry_map(reference_cell, quadrature_points.data());
+    let geometry_evaluator = grid
+        .local_grid()
+        .geometry_map(reference_cell, quadrature_points.data());
 
     // The following arrays hold the jacobians, their determinants and the normals.
 
-    let mut jacobians =
-        rlst_dynamic_array3![T::Real, [grid.geometry_dim(), tdim, n_quadrature_points]];
+    let mut jacobians = rlst_dynamic_array3![
+        T::Real,
+        [grid.local_grid().geometry_dim(), tdim, n_quadrature_points]
+    ];
     let mut jdets = rlst_dynamic_array1![T::Real, [n_quadrature_points]];
-    let mut normals = rlst_dynamic_array2![T::Real, [grid.geometry_dim(), n_quadrature_points]];
+    let mut normals = rlst_dynamic_array2![
+        T::Real,
+        [grid.local_grid().geometry_dim(), n_quadrature_points]
+    ];
 
     // Now iterate through the cells of the grid, get the attached dofs and evaluate the geometry map.
 
@@ -152,7 +149,7 @@ where
     let mut data = Vec::<T>::default();
 
     for (embedded_index, &cell_index) in owned_support_cells.iter().enumerate() {
-        let cell = grid.entity(tdim, cell_index).unwrap();
+        let cell = grid.local_grid().entity(tdim, cell_index).unwrap();
         // We need to get the global embeddeded index of the owned support cell.
         // First we get the global index of the owned support cell.
 
@@ -170,10 +167,15 @@ where
         );
         // Get the global dofs of the cell.
         let global_dofs = function_space
+            .local_space()
             .cell_dofs(cell_index)
             .unwrap()
             .iter()
-            .map(|local_dof_index| function_space.global_dof_index(*local_dof_index))
+            .map(|local_dof_index| {
+                function_space
+                    .local_space()
+                    .global_dof_index(*local_dof_index)
+            })
             .collect::<Vec<_>>();
 
         for (qindex, (jdet, qweight)) in izip!(jdets.iter(), quadrature_weights.iter()).enumerate()
@@ -210,7 +212,7 @@ pub struct NeighbourEvaluator<
     'a,
     T: RlstScalar + Equivalence,
     K: Kernel<T = T>,
-    GridImpl: ParallelGrid<C, T = T::Real>,
+    GridImpl: ParallelGrid<C = C, T = T::Real>,
     C: Communicator,
 > {
     eval_points: Vec<T::Real>,
@@ -230,7 +232,7 @@ impl<
         'a,
         T: RlstScalar + Equivalence,
         K: Kernel<T = T>,
-        GridImpl: ParallelGrid<C, T = T::Real>,
+        GridImpl: ParallelGrid<C = C, T = T::Real>,
         C: Communicator,
     > NeighbourEvaluator<'a, T, K, GridImpl, C>
 {
@@ -242,16 +244,14 @@ impl<
         support_cells: &[usize],
         grid: &'a GridImpl,
     ) -> Self {
-        let tdim = grid.topology_dim();
+        let tdim = grid.local_grid().topology_dim();
 
         let comm = grid.comm();
 
         // The method is currently restricted to single element type grids.
         // So let's make sure that this is the case.
 
-        assert_eq!(grid.entity_types(tdim).len(), 1);
-
-        let reference_cell = grid.entity_types(tdim)[0];
+        assert_eq!(grid.local_grid().entity_types(tdim).len(), 1);
 
         // Get the number of points
         assert_eq!(eval_points.len() % tdim, 0);
@@ -269,17 +269,11 @@ impl<
         let support_cells = support_cells
             .iter()
             .copied()
-            .sorted_by_key(|&index| grid.entity(tdim, index).unwrap().global_index())
-            .collect_vec();
-
-        let support_cell_owners = support_cells
-            .iter()
-            .map(|index| {
-                if let Ownership::Ghost(owner, _) = grid.entity(tdim, *index).unwrap().ownership() {
-                    owner
-                } else {
-                    comm.rank() as usize
-                }
+            .sorted_by_key(|&index| {
+                grid.local_grid()
+                    .entity(tdim, index)
+                    .unwrap()
+                    .global_index()
             })
             .collect_vec();
 
@@ -287,7 +281,10 @@ impl<
             .iter()
             .filter(|cell_index| {
                 matches!(
-                    grid.entity(tdim, **cell_index).unwrap().ownership(),
+                    grid.local_grid()
+                        .entity(tdim, **cell_index)
+                        .unwrap()
+                        .ownership(),
                     Ownership::Owned
                 )
             })
@@ -298,7 +295,7 @@ impl<
         // easier we embed the owned support cells into the set of all owned cells.
 
         let index_embedding =
-            IndexEmbedding::new(grid.cell_index_layout(), &owned_support_cells, grid.comm());
+            IndexEmbedding::new(grid.cell_layout(), &owned_support_cells, grid.comm());
 
         let n_owned_support_cells = owned_support_cells.len();
 
@@ -312,14 +309,17 @@ impl<
         // We now setup the data mapper with respect to all owned cells on each process.
 
         let global_to_local_mapper = Global2LocalDataMapper::new(
-            grid.cell_index_layout(),
+            grid.cell_layout(),
             &support_cells
                 .iter()
-                .map(|index| grid.entity(tdim, *index).unwrap().global_index())
+                .map(|index| {
+                    grid.local_grid()
+                        .entity(tdim, *index)
+                        .unwrap()
+                        .global_index()
+                })
                 .collect_vec(),
         );
-
-        // Finally, we need a map that tells us for each support cell index what the corresponding position in the `support_cells` vector is.
 
         Self {
             eval_points: eval_points.to_vec(),
@@ -342,11 +342,8 @@ impl<
         // and then map this vector globally across all processes to the active cells
         // on each process.
 
-        let mut all_cells_vec = vec![
-            T::zero();
-            self.grid.cell_index_layout().number_of_local_indices()
-                * self.n_points
-        ];
+        let mut all_cells_vec =
+            vec![T::zero(); self.grid.cell_layout().number_of_local_indices() * self.n_points];
 
         self.index_embedding
             .embed_data(x.local().data(), &mut all_cells_vec, self.n_points);
@@ -361,7 +358,7 @@ impl<
 impl<
         T: RlstScalar + Equivalence,
         K: Kernel<T = T>,
-        GridImpl: ParallelGrid<C, T = T::Real>,
+        GridImpl: ParallelGrid<C = C, T = T::Real>,
         C: Communicator,
     > std::fmt::Debug for NeighbourEvaluator<'_, T, K, GridImpl, C>
 {
@@ -379,7 +376,7 @@ impl<
         'a,
         T: RlstScalar + Equivalence,
         K: Kernel<T = T>,
-        GridImpl: ParallelGrid<C, T = T::Real>,
+        GridImpl: ParallelGrid<C = C, T = T::Real>,
         C: Communicator,
     > OperatorBase for NeighbourEvaluator<'a, T, K, GridImpl, C>
 {
@@ -399,7 +396,7 @@ impl<
 impl<
         T: RlstScalar + Equivalence,
         K: Kernel<T = T>,
-        GridImpl: ParallelGrid<C, T = T::Real>,
+        GridImpl: ParallelGrid<C = C, T = T::Real>,
         C: Communicator,
     > AsApply for NeighbourEvaluator<'_, T, K, GridImpl, C>
 where
@@ -418,8 +415,8 @@ where
     ) {
         // We need to iterate through the elements.
 
-        let tdim = self.grid.topology_dim();
-        let gdim = self.grid.geometry_dim();
+        let tdim = self.grid.local_grid().topology_dim();
+        let gdim = self.grid.local_grid().geometry_dim();
 
         // We need the chunk size of the targets. This is the chunk size of the domain multiplied
         // with the range component count of the kernel.
@@ -429,7 +426,7 @@ where
         let n_points = self.n_points;
 
         // We need the reference cell
-        let reference_cell = self.grid.entity_types(tdim)[0];
+        let reference_cell = self.grid.local_grid().entity_types(tdim)[0];
 
         // We now need to communicate the data. The `charges` vector contains all charges for the active cells on this process.
 

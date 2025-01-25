@@ -8,7 +8,7 @@ use itertools::Itertools;
 use mpi::traits::Communicator;
 use ndelement::types::ReferenceCellType;
 use ndgrid::{
-    traits::{Entity, GeometryMap, Grid},
+    traits::{Entity, GeometryMap, Grid, ParallelGrid},
     types::Ownership,
 };
 use rand::SeedableRng;
@@ -34,6 +34,7 @@ fn main() {
     // Now get the active cells on the current process.
 
     let n_cells = grid
+        .local_grid()
         .entity_iter(2)
         .filter(|e| matches!(e.ownership(), Ownership::Owned))
         .count();
@@ -46,7 +47,7 @@ fn main() {
         points.data(),
         Laplace3dKernel::default(),
         green_kernels::types::GreenKernelEvalType::Value,
-        &(0..grid.entity_count(ReferenceCellType::Triangle)).collect_vec(),
+        &(0..grid.local_grid().entity_count(ReferenceCellType::Triangle)).collect_vec(),
         &grid,
     );
 
@@ -56,9 +57,12 @@ fn main() {
 
     let mut physical_points = vec![0 as f64; 3 * n_points * n_cells];
 
-    let geometry_map = grid.geometry_map(ReferenceCellType::Triangle, points.data());
+    let geometry_map = grid
+        .local_grid()
+        .geometry_map(ReferenceCellType::Triangle, points.data());
 
     for cell in grid
+        .local_grid()
         .entity_iter(2)
         .filter(|e| matches!(e.ownership(), Ownership::Owned))
     {
