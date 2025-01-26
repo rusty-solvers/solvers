@@ -54,7 +54,7 @@ pub trait LocalFunctionSpaceTrait {
 
     /// Get an array of all cell dofs for each cell.
     ///
-    /// Returns a flat array of all cell dofs for all lcoal cells (owned and ghost), ordered by
+    /// Returns a flat array of all cell dofs for all lcoal cells in the support (owned and ghost), ordered by
     /// global index of the cell.
     fn all_cell_dofs(&self) -> Vec<usize> {
         self.support_cells()
@@ -66,18 +66,11 @@ pub trait LocalFunctionSpaceTrait {
 
     /// Get an array of all cell dofs for each owned cell.
     ///
-    /// Returns a flat array of all cell dofs for all owned lcoal cells, ordered by
+    /// Returns a flat array of all cell dofs for all owned lcoal cells in the support, ordered by
     /// global index of the cell.
     fn owned_cell_dofs(&self) -> Vec<usize> {
-        let tdim = self.grid().topology_dim();
-        self.support_cells()
+        self.owned_support_cells()
             .iter()
-            .filter(|&&entity_index| {
-                matches!(
-                    self.grid().entity(tdim, entity_index).unwrap().ownership(),
-                    Ownership::Owned
-                )
-            })
             .flat_map(|&entity_index| self.cell_dofs(entity_index).unwrap())
             .copied()
             .collect_vec()
@@ -101,8 +94,14 @@ pub trait LocalFunctionSpaceTrait {
     /// Get the local indices of the support cells associated with this space.
     ///
     /// The vector of support cells is sorted in ascending order by global cell index and may contain
-    /// ghost cells who are not owned by the current process.
+    /// ghost cells who are not owned by the current process. Owned cells are always before the ghost
+    /// cells within the support cells.
     fn support_cells(&self) -> &[usize];
+
+    /// Get the owned support cells.
+    ///
+    /// The owned support cells are sorted in ascending order by global cell index.
+    fn owned_support_cells(&self) -> &[usize];
 }
 
 /// A function space
@@ -159,6 +158,7 @@ pub struct LocalFunctionSpace<
     global_dof_numbers: Vec<usize>,
     ownership: Vec<Ownership>,
     support_cells: Vec<usize>,
+    owned_support_cells: Vec<usize>,
 }
 
 impl<
@@ -186,9 +186,13 @@ impl<
             .sum();
 
         let tdim = grid.topology_dim();
-        let support_cells = (0..cell_count)
-            .sorted_by_key(|entity_index| grid.entity(tdim, *entity_index).unwrap().global_index())
+        let support_cells = (0..cell_count).collect_vec();
+        let owned_support_cells = support_cells
+            .iter()
+            .filter(|cell_index| grid.entity(tdim, **cell_index).unwrap().is_owned())
+            .copied()
             .collect_vec();
+
         Self {
             grid,
             elements,
@@ -200,6 +204,7 @@ impl<
             ownership,
             // At the moment all spaces are global.
             support_cells,
+            owned_support_cells,
         }
     }
 }
@@ -324,6 +329,10 @@ impl<
 
     fn support_cells(&self) -> &[usize] {
         self.support_cells.as_slice()
+    }
+
+    fn owned_support_cells(&self) -> &[usize] {
+        self.owned_support_cells.as_slice()
     }
 }
 
@@ -648,12 +657,11 @@ impl<'a, Space: FunctionSpaceTrait> SpaceEvaluator<'a, Space> {
         };
 
         let id_mapper = if map_to_ids {
-            let tdim = space.grid().local_grid().topology_dim();
             let owned_ids = space
                 .grid()
                 .local_grid()
-                .entity_iter(tdim)
-                .filter(|entity| matches!(entity.ownership(), Ownership::Owned))
+                .cell_iter()
+                .take_while(|cell| cell.is_owned())
                 .map(|entity| entity.id().unwrap())
                 .collect_vec();
 
@@ -663,7 +671,7 @@ impl<'a, Space: FunctionSpaceTrait> SpaceEvaluator<'a, Space> {
         };
 
         let range_layout = Rc::new(IndexLayout::from_local_counts(
-            space.grid().local_grid().cell_count() * n_eval_points * range_component_count,
+            space.grid().local_grid().owned_cell_count() * n_eval_points * range_component_count,
             space.comm(),
         ));
 
@@ -747,17 +755,21 @@ impl<Space: FunctionSpaceTrait> AsApply for SpaceEvaluator<'_, Space> {
 
         // We now go through each cell and evaluate the local coefficients in the cell
 
-        for (res, basis_coeffs) in izip!(
-            y.view_mut()
-                .local_mut()
-                .data_mut()
-                .chunks_mut(element.value_size() * self.n_eval_points),
+        let chunk_size = element.value_size() * self.n_eval_points;
+
+        for (cell_index, basis_coeffs) in izip!(
+            self.space.local_space().owned_support_cells(),
             cell_coeffs.chunks(element.dim())
         ) {
             // Now we loop over the basis functions and points and add the contributions to the result.
 
+            let mut local_view = y.view_mut().local_mut();
+
+            let slice =
+                &mut local_view.data_mut()[cell_index * chunk_size..(1 + cell_index) * chunk_size];
+
             let mut res =
-                rlst_array_from_slice_mut2!(res, [element.value_size(), self.n_eval_points]);
+                rlst_array_from_slice_mut2!(slice, [element.value_size(), self.n_eval_points]);
 
             for (basis_index, &basis_coeff) in basis_coeffs.iter().enumerate() {
                 for point_index in 0..dims[1] {
