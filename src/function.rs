@@ -17,7 +17,7 @@ use num::Zero;
 use rlst::operator::interface::DistributedArrayVectorSpace;
 use rlst::{
     rlst_array_from_slice2, rlst_array_from_slice_mut2, rlst_dynamic_array4, AsApply, IndexLayout,
-    MatrixInverse, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
+    MatrixInverse, OperatorBase, PrettyPrint, RawAccess, RawAccessMut, RlstScalar,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -56,11 +56,12 @@ pub trait LocalFunctionSpaceTrait {
     ///
     /// Returns a flat array of all cell dofs for all lcoal cells in the support (owned and ghost), ordered by
     /// global index of the cell.
-    fn all_cell_dofs(&self) -> Vec<usize> {
+    fn global_dofs_on_all_support_cells(&self) -> Vec<usize> {
         self.support_cells()
             .iter()
             .flat_map(|&entity_index| self.cell_dofs(entity_index).unwrap())
             .copied()
+            .map(|local_dof_index| self.global_dof_index(local_dof_index))
             .collect_vec()
     }
 
@@ -68,11 +69,12 @@ pub trait LocalFunctionSpaceTrait {
     ///
     /// Returns a flat array of all cell dofs for all owned lcoal cells in the support, ordered by
     /// global index of the cell.
-    fn owned_cell_dofs(&self) -> Vec<usize> {
+    fn global_dofs_on_owned_support_cells(&self) -> Vec<usize> {
         self.owned_support_cells()
             .iter()
             .flat_map(|&entity_index| self.cell_dofs(entity_index).unwrap())
             .copied()
+            .map(|local_dof_index| self.global_dof_index(local_dof_index))
             .collect_vec()
     }
 
@@ -640,7 +642,7 @@ impl<'a, Space: FunctionSpaceTrait> SpaceEvaluator<'a, Space> {
     ) -> Self {
         let global_to_local_mapper = Global2LocalDataMapper::new(
             space.index_layout(),
-            &space.local_space().owned_cell_dofs(),
+            &space.local_space().global_dofs_on_owned_support_cells(),
         );
 
         let tdim = space.grid().local_grid().topology_dim();
@@ -730,7 +732,6 @@ impl<Space: FunctionSpaceTrait> AsApply for SpaceEvaluator<'_, Space> {
         y *= beta;
 
         let tdim = self.space.local_space().grid().topology_dim();
-        let gdim = self.space.local_space().grid().geometry_dim();
 
         let reference_cell = self.space.local_space().grid().entity_types(tdim)[0];
 
@@ -750,7 +751,7 @@ impl<Space: FunctionSpaceTrait> AsApply for SpaceEvaluator<'_, Space> {
         let dims = element.tabulate_array_shape(0, self.n_eval_points);
         let mut basis_values = rlst_dynamic_array4!(<Space as FunctionSpaceTrait>::T, dims);
         let eval_points_array =
-            rlst_array_from_slice2!(&self.eval_points, [gdim, self.n_eval_points]);
+            rlst_array_from_slice2!(&self.eval_points, [tdim, self.n_eval_points]);
         element.tabulate(&eval_points_array, 0, &mut basis_values);
 
         // We now go through each cell and evaluate the local coefficients in the cell

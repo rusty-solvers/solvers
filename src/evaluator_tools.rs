@@ -1,6 +1,9 @@
 //! Various helper functions to support evaluators.
 
-use std::{collections::HashSet, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use bempp_distributed_tools::{index_embedding::IndexEmbedding, Global2LocalDataMapper};
 use green_kernels::{traits::Kernel, types::GreenKernelEvalType};
@@ -209,6 +212,7 @@ pub struct NeighbourEvaluator<'a, Space: FunctionSpaceTrait, K: Kernel<T = Space
     owned_support_cells: Vec<usize>,
     global_to_local_mapper: Global2LocalDataMapper<'a, Space::C>,
     index_embedding: IndexEmbedding<'a, Space::C>,
+    dof_to_position: HashMap<usize, usize>,
 }
 
 impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<'a, Space, K> {
@@ -271,20 +275,31 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
 
         // We now setup the data mapper with respect to all owned cells on each process.
 
-        let global_to_local_mapper = Global2LocalDataMapper::new(
-            grid.cell_layout(),
-            &space
-                .local_space()
-                .support_cells()
-                .iter()
-                .map(|index| {
-                    grid.local_grid()
-                        .entity(tdim, *index)
-                        .unwrap()
-                        .global_index()
-                })
-                .collect_vec(),
-        );
+        let required_dofs = space
+            .local_space()
+            .support_cells()
+            .iter()
+            .map(|index| {
+                grid.local_grid()
+                    .entity(tdim, *index)
+                    .unwrap()
+                    .global_index()
+            })
+            .collect_vec();
+
+        let global_to_local_mapper =
+            Global2LocalDataMapper::new(grid.cell_layout(), &required_dofs);
+
+        // We now need to setup a mapping from local cell index to position in the require dofs.
+        // This is needed later to copy out the correct data slice from the charges vector.
+
+        let dof_to_position: HashMap<usize, usize> = space
+            .local_space()
+            .support_cells()
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (*d, i))
+            .collect();
 
         Self {
             space,
@@ -297,6 +312,7 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
             owned_support_cells,
             global_to_local_mapper,
             index_embedding,
+            dof_to_position,
         }
     }
 
@@ -402,7 +418,7 @@ where
         let geometry_map = local_grid.geometry_map(reference_cell, eval_points);
         let kernel = &self.kernel;
         let eval_type = self.eval_type;
-        let dof_to_position_map = &self.global_to_local_mapper.dof_to_position_map();
+        let dof_to_position = &self.dof_to_position;
 
         y.view_mut()
             .local_mut()
@@ -451,7 +467,7 @@ where
                     // Get the points of the other cell.
                     geometry_map.points(source_cell, source_points.data_mut());
                     // Now get the right charges.
-                    let charge_start = dof_to_position_map[&source_cell] * n_points;
+                    let charge_start = dof_to_position[&source_cell] * n_points;
                     let charge_end = charge_start + n_points;
                     source_charges
                         .data_mut()
