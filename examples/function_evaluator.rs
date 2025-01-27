@@ -1,10 +1,11 @@
 //! Demo the evaluation of functions in Bempp-rs
 
+use std::rc::Rc;
+
 use bempp::function::FunctionSpaceTrait;
 use bempp::function::LocalFunctionSpaceTrait;
 use bempp::function::SpaceEvaluator;
 use itertools::izip;
-use itertools::Itertools;
 use mpi::traits::Communicator;
 use ndelement::ciarlet::LagrangeElementFamily;
 use ndelement::types::ReferenceCellType;
@@ -12,6 +13,7 @@ use ndgrid::traits::Entity;
 use ndgrid::traits::GeometryMap;
 use ndgrid::traits::Grid;
 use ndgrid::traits::ParallelGrid;
+use rlst::operator::interface::DistributedArrayVectorSpace;
 use rlst::{operator::zero_element, prelude::*};
 
 fn main() {
@@ -19,9 +21,11 @@ fn main() {
     let world = universe.world();
     let rank = world.rank() as usize;
 
+    let refinement_level = 5;
+
     // We create a sphere grid
 
-    let grid = bempp::shapes::regular_sphere::<f64, _>(5, 1, &world);
+    let grid = bempp::shapes::regular_sphere::<f64, _>(refinement_level, 1, &world);
 
     // We have the grid. Now create the function space.
 
@@ -37,7 +41,7 @@ fn main() {
 
     // Let us setup the evaluator. We will evaluate on the midpoint of each cell.
 
-    let evaluator = SpaceEvaluator::new(&space, &[1. / 3.0, 1. / 3.0], false);
+    let evaluator = SpaceEvaluator::new(&space, &[1. / 3.0, 1. / 3.0], true);
 
     // Let us sample a function on the grid. We iterate through each cell, evaluate the function on the vertices and save
     // in the corresponding dof position.
@@ -71,58 +75,62 @@ fn main() {
 
     let result = evaluator.apply(x.r());
 
-    // We now go through the grid owned grid cells and compare the computed result against the actual result.
+    // We now evaluate the same on the first process and check that the results are identical.
 
-    let mut expected = zero_element(evaluator.range());
+    // We need to send the result vector to process zero.
 
-    let geometry_map = space
-        .grid()
-        .local_grid()
-        .geometry_map(ReferenceCellType::Triangle, &[1.0 / 3.0, 1.0 / 3.0]);
+    if rank == 0 {
+        let self_comm = mpi::topology::SimpleCommunicator::self_comm();
+        let grid = bempp::shapes::regular_sphere::<f64, _>(refinement_level, 1, &self_comm);
 
-    let mut point = vec![0_f64; 3];
+        let space = bempp::function::FunctionSpace::new(
+            &grid,
+            &LagrangeElementFamily::<f64>::new(1, ndelement::types::Continuity::Standard),
+        );
 
-    for (cell, e) in izip!(
-        space
+        // Now evaluate the comparison vector here.
+
+        let array_space = DistributedArrayVectorSpace::<_, f64>::from_index_layout(Rc::new(
+            IndexLayout::from_local_counts(grid.local_grid().cell_count(), &self_comm),
+        ));
+
+        // Let's go through the grid now, and save in the correct order of cell ids.
+
+        let mut expected = zero_element(array_space.clone());
+
+        let geometry_map = space
+            .grid()
+            .local_grid()
+            .geometry_map(ReferenceCellType::Triangle, &[1.0 / 3.0, 1.0 / 3.0]);
+
+        let mut point = vec![0_f64; 3];
+
+        for cell in izip!(space
             .grid()
             .local_grid()
             .cell_iter()
-            .take_while(|cell| cell.is_owned()),
-        expected.view_mut().local_mut().data_mut().iter_mut()
-    ) {
-        geometry_map.points(cell.local_index(), &mut point);
+            .take_while(|cell| cell.is_owned()),)
+        {
+            geometry_map.points(cell.local_index(), &mut point);
 
-        *e = point[0].cos();
-    }
+            let id = cell.id().unwrap();
 
-    // Now compute the relative error
+            expected.view_mut().local_mut()[[id]] = point[0].cos();
+        }
 
-    let rel_err = (result.r() - expected.r()) / expected.r().norm();
+        // We have the expected vector. Now gather the distributed vector to the root and compare with the expected.
 
-    println!(
-        "Max distance on rank {}: {}",
-        rank,
-        rel_err
+        let mut root_result = zero_element(array_space.clone());
+
+        result
             .view()
-            .local()
-            .iter()
-            .max_by(|a, b| a.total_cmp(b))
-            .unwrap()
-    );
+            .gather_to_rank_root(root_result.view_mut().local_mut().r_mut());
 
-    println!(
-        "Max position on rank {}: {}",
-        rank,
-        rel_err
-            .view()
-            .local()
-            .iter()
-            .position_max_by(|a, b| a.total_cmp(b))
-            .unwrap()
-    );
+        // Let us now compare the results.
+        let rel_err = (root_result.r() - expected.r()).norm() / expected.r().norm();
 
-    if world.rank() == 1 {
-        println!("First value {}", result.r().view().local().data()[8]);
-        println!("Expected value {}", expected.r().view().local().data()[8]);
+        println!("Relative error: {}", rel_err);
+    } else {
+        result.view().gather_to_rank(0);
     }
 }
