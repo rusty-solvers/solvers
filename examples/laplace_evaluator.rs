@@ -6,8 +6,9 @@ use bempp::{
     function::{FunctionSpaceTrait, LocalFunctionSpaceTrait},
 };
 use green_kernels::laplace_3d::Laplace3dKernel;
-use mpi::traits::Communicator;
+use mpi::traits::{Communicator, CommunicatorCollectives};
 use ndelement::{ciarlet::LagrangeElementFamily, types::ReferenceCellType};
+use ndgrid::traits::{Grid, ParallelGrid};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rlst::{
@@ -21,14 +22,18 @@ fn main() {
 
     let mut rng = ChaCha8Rng::seed_from_u64(world.rank() as u64);
 
-    let grid = bempp::shapes::regular_sphere::<f64, _>(5, 1, &world);
+    let grid = bempp::shapes::regular_sphere::<f64, _>(4, 1, &world);
+    println!(
+        "Number of elements: {}",
+        grid.cell_layout().number_of_global_indices()
+    );
 
     let quad_degree = 6;
     // Get the number of cells in the grid.
 
     let space = bempp::function::FunctionSpace::new(
         &grid,
-        &LagrangeElementFamily::<f64>::new(1, ndelement::types::Continuity::Discontinuous),
+        &LagrangeElementFamily::<f64>::new(1, ndelement::types::Continuity::Standard),
     );
 
     let mut options = BoundaryAssemblerOptions::default();
@@ -40,7 +45,7 @@ fn main() {
 
     let assembler = bempp::laplace::assembler::single_layer::<f64>(&options);
 
-    let dense_matrix = assembler.assemble(&space, &space);
+    //let dense_matrix = assembler.assemble(&space, &space);
 
     // Now let's build an evaluator.
 
@@ -93,15 +98,17 @@ fn main() {
 
     let res = laplace_evaluator.apply(x.r());
 
-    let res_local = res.view().local();
+    println!("Finished.");
 
-    let mut expected = rlst_dynamic_array1!(f64, [space.local_space().global_size()]);
+    // let res_local = res.view().local();
 
-    expected
-        .r_mut()
-        .simple_mult_into(dense_matrix.r(), x.view().local().r());
+    // let mut expected = rlst_dynamic_array1!(f64, [space.local_space().global_size()]);
 
-    let rel_diff = (expected.r() - res_local.r()).norm_2() / expected.r().norm_2();
+    // expected
+    //     .r_mut()
+    //     .simple_mult_into(dense_matrix.r(), x.view().local().r());
 
-    println!("Relative difference: {}", rel_diff);
+    // let rel_diff = (expected.r() - res_local.r()).norm_2() / expected.r().norm_2();
+
+    // println!("Relative difference: {}", rel_diff);
 }

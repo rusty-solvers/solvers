@@ -6,7 +6,7 @@ use mpi::traits::{Communicator, Equivalence};
 use ndelement::{ciarlet::CiarletElement, types::ReferenceCellType};
 use ndgrid::{
     traits::{Builder, ParallelBuilder},
-    types::RealScalar,
+    types::{GraphPartitioner, RealScalar},
     ParallelGridImpl, SingleElementGrid, SingleElementGridBuilder,
 };
 use num::Float;
@@ -106,7 +106,7 @@ pub fn regular_sphere<T: RealScalar + Equivalence, C: Communicator>(
             b.add_cell(i, v);
         }
 
-        b.create_parallel_grid_root(comm)
+        b.create_parallel_grid_root(comm, GraphPartitioner::None)
     } else {
         SingleElementGridBuilder::new(3, (ReferenceCellType::Triangle, degree))
             .create_parallel_grid(comm, 0)
@@ -164,7 +164,7 @@ pub fn screen_triangles<T: RealScalar + Equivalence, C: Communicator>(
             }
         }
 
-        b.create_parallel_grid_root(comm)
+        b.create_parallel_grid_root(comm, GraphPartitioner::None)
     } else {
         SingleElementGridBuilder::new(3, (ReferenceCellType::Triangle, 1))
             .create_parallel_grid(comm, 0)
@@ -215,7 +215,7 @@ pub fn screen_quadrilaterals<T: RealScalar + Equivalence, C: Communicator>(
             }
         }
 
-        b.create_parallel_grid_root(comm)
+        b.create_parallel_grid_root(comm, GraphPartitioner::None)
     } else {
         SingleElementGridBuilder::new(3, (ReferenceCellType::Quadrilateral, 1))
             .create_parallel_grid(comm, 0)
