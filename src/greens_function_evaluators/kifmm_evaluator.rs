@@ -104,6 +104,9 @@ where
 
         let simple_comm = domain_space.index_layout().comm().duplicate();
 
+        println!("nsources {}", sources.len());
+        println!("ntargets {}", targets.len());
+
         let builder = MultiNodeBuilder::new(false)
             .tree(
                 &simple_comm,
@@ -212,7 +215,7 @@ where
         // Now forward permute the source vector.
 
         self.source_permutation
-            .forward_permute(x.view().local().data(), x_permuted.data_mut());
+            .forward_permute(x.view().local().data(), x_permuted.data_mut(), 1);
 
         // Multiply with the vector alpha
 
@@ -236,7 +239,7 @@ where
 
         // Now permute back the result.
         self.target_permutation
-            .backward_permute(y_permuted.data(), y_result.data_mut());
+            .backward_permute(y_permuted.data(), y_result.data_mut(), 1);
 
         // Scale the vector y with beta before we add the result.
         y.scale_inplace(beta);

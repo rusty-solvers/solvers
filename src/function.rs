@@ -789,7 +789,7 @@ impl<Space: FunctionSpaceTrait> AsApply for SpaceEvaluator<'_, Space> {
         if let Some(id_mapper) = self.id_mapper.as_ref() {
             let mut id_ordered_data =
                 vec![<Space::T as Zero>::zero(); y.view().index_layout().number_of_local_indices()];
-            id_mapper.backward_permute(y.view().local().data(), &mut id_ordered_data);
+            id_mapper.backward_permute(y.view().local().data(), &mut id_ordered_data, chunk_size);
 
             y.view_mut()
                 .local_mut()
