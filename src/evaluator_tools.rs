@@ -33,7 +33,7 @@ use crate::function::{FunctionSpaceTrait, LocalFunctionSpaceTrait};
 /// Create a linear operator from the map of a basis to points. The points are sorted by global
 /// index of the corresponding cells in the support. The output space is the space obtained through
 /// the owned support cells on each process.
-pub fn basis_to_point_map<
+pub fn space_to_point_map<
     'a,
     T: RlstScalar + Equivalence,
     C: Communicator,
@@ -43,10 +43,7 @@ pub fn basis_to_point_map<
     quadrature_points: &[T::Real],
     quadrature_weights: &[T::Real],
     return_transpose: bool,
-) -> Operator<DistributedCsrMatrixOperatorImpl<'a, T, C>>
-where
-    T::Real: Equivalence,
-{
+) -> Operator<DistributedCsrMatrixOperatorImpl<'a, T, C>> {
     // Get the grid.
     let grid = function_space.grid();
 
@@ -206,8 +203,10 @@ where
 
 /// Create a linear operator from the map of a basis to points.
 pub struct NeighbourEvaluator<'a, Space: FunctionSpaceTrait, K: Kernel<T = Space::T>> {
-    /// The function space on which the evaluator acts
-    space: &'a Space,
+    /// The source function space on which the evaluator acts
+    source_space: &'a Space,
+    /// The target function space on which the evaluator acts
+    target_space: &'a Space,
     /// The element evaluation points (usually quadrature points)
     eval_points: Vec<<Space::T as RlstScalar>::Real>,
     /// The number of evaluation points
@@ -231,12 +230,17 @@ pub struct NeighbourEvaluator<'a, Space: FunctionSpaceTrait, K: Kernel<T = Space
 impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<'a, Space, K> {
     /// Create a new neighbour evaluator.
     pub fn new(
-        space: &'a Space,
+        source_space: &'a Space,
+        target_space: &'a Space,
         eval_points: &[<Space::T as RlstScalar>::Real],
         kernel: K,
         eval_type: GreenKernelEvalType,
     ) -> Self {
-        let grid = space.grid();
+        assert!(
+            std::ptr::addr_eq(source_space.grid(), target_space.grid()),
+            "Source and target space must have the same grid."
+        );
+        let grid = target_space.grid();
         let tdim = grid.local_grid().topology_dim();
 
         let comm = grid.comm();
@@ -250,36 +254,38 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
         assert_eq!(eval_points.len() % tdim, 0);
         let n_points = eval_points.len() / tdim;
 
-        let owned_support_cells = space.local_space().owned_support_cells();
+        let owned_source_support_cells = source_space.local_space().owned_support_cells();
+        let owned_target_support_cells = target_space.local_space().owned_support_cells();
 
-        // The data will be coming in with respect to owned support cells. However, to make data distribution
+        // The data will be coming in with respect to owned source support cells. However, to make data distribution
         // easier we embed the owned support cells into the set of all owned cells.
 
         let index_embedding =
-            IndexEmbedding::new(grid.cell_layout(), owned_support_cells, grid.comm());
+            IndexEmbedding::new(grid.cell_layout(), owned_source_support_cells, grid.comm());
 
-        let n_owned_support_cells = owned_support_cells.len();
+        let n_owned_target_support_cells = owned_target_support_cells.len();
+        let n_owned_source_support_cells = owned_source_support_cells.len();
 
         // We now setup the array space. This is a distributed array space with a layout corresponding
         // to the number of points on each process.
 
         let domain_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
-            IndexLayout::from_local_counts(n_owned_support_cells * n_points, comm),
+            IndexLayout::from_local_counts(n_owned_source_support_cells * n_points, comm),
         ));
 
         let range_space = DistributedArrayVectorSpace::from_index_layout(Rc::new(
             IndexLayout::from_local_counts(
-                n_owned_support_cells * n_points * kernel.range_component_count(eval_type),
+                n_owned_target_support_cells * n_points * kernel.range_component_count(eval_type),
                 comm,
             ),
         ));
 
-        // We now setup the data mapper that maps from all owned cells to the right order of all owned support cells.
+        // We now setup the data mapper that maps from all owned cells to the right order of all owned source support cells.
         // The data mapper acts on global indices, so have to map the indices of the support cells to their respective
         // global indices. Note that we use `support_cells` and not `owned_support_cells` since we need the action of all
         // owned support cells against all support cells.
 
-        let required_dofs = space
+        let required_dofs = source_space
             .local_space()
             .support_cells()
             .iter()
@@ -297,7 +303,7 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
         // We now need to setup a mapping from local cell index to position in the require dofs.
         // This is needed later to copy out the correct data slice from the charges vector.
 
-        let cell_to_position: HashMap<usize, usize> = space
+        let cell_to_position: HashMap<usize, usize> = source_space
             .local_space()
             .support_cells()
             .iter()
@@ -306,7 +312,8 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
             .collect();
 
         Self {
-            space,
+            source_space,
+            target_space,
             eval_points: eval_points.to_vec(),
             n_points,
             kernel,
@@ -328,7 +335,10 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
 
         let mut all_owned_cells_vec = vec![
             <Space::T as Zero>::zero();
-            self.space.grid().cell_layout().number_of_local_indices()
+            self.source_space
+                .grid()
+                .cell_layout()
+                .number_of_local_indices()
                 * self.n_points
         ];
 
@@ -387,8 +397,8 @@ where
         beta: <Self::Range as rlst::LinearSpace>::F,
         mut y: Element<ContainerOut>,
     ) {
-        let tdim = self.space.grid().local_grid().topology_dim();
-        let gdim = self.space.grid().local_grid().geometry_dim();
+        let tdim = self.source_space.grid().local_grid().topology_dim();
+        let gdim = self.source_space.grid().local_grid().geometry_dim();
 
         // We need the chunk size of the targets. This is the chunk size of the domain multiplied
         // with the range component count of the kernel.
@@ -397,7 +407,7 @@ where
         let n_points = self.n_points;
 
         // We need the reference cell
-        let reference_cell = self.space.grid().local_grid().entity_types(tdim)[0];
+        let reference_cell = self.source_space.grid().local_grid().entity_types(tdim)[0];
 
         // We now need to communicate the data. The `charges` vector contains all charges for the support cells on this process.
 
@@ -412,12 +422,17 @@ where
         // thread safe due to the communicator that is not necessarily thread safe.
 
         // The local grid
-        let local_grid = self.space.grid().local_grid();
+        let local_grid = self.source_space.grid().local_grid();
         // All support cells (including ghosts). We need this as set to check if a given cell is a support cell.
-        let support_cells: HashSet<usize> =
-            HashSet::from_iter(self.space.local_space().support_cells().iter().copied());
+        let source_support_cells: HashSet<usize> = HashSet::from_iter(
+            self.source_space
+                .local_space()
+                .support_cells()
+                .iter()
+                .copied(),
+        );
         // The owned support cells
-        let owned_support_cells = self.space.local_space().owned_support_cells();
+        let owned_target_support_cells = self.target_space.local_space().owned_support_cells();
         // Evaluation points
         let eval_points = self.eval_points.as_slice();
         // Geometry map that maps from reference points to physical points
@@ -437,7 +452,7 @@ where
             .local_mut()
             .data_mut()
             .par_chunks_mut(target_chunk_size)
-            .zip(owned_support_cells)
+            .zip(owned_target_support_cells)
             .for_each(|(result_chunk, &owned_target_cell_index)| {
                 let cell_entity = local_grid.entity(tdim, owned_target_cell_index).unwrap();
 
@@ -461,7 +476,7 @@ where
                             .connected_entity_iter(tdim)
                             .collect_vec()
                     })
-                    .filter(|&cell| support_cells.contains(&cell))
+                    .filter(|&cell| source_support_cells.contains(&cell))
                     .unique()
                     .collect_vec();
 

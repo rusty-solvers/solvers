@@ -100,6 +100,11 @@ pub trait LocalFunctionSpaceTrait {
     /// cells within the support cells.
     fn support_cells(&self) -> &[usize];
 
+    /// Return the cell type of the underlying grid
+    fn cell_type(&self) -> ReferenceCellType {
+        self.grid().entity_types(self.grid().topology_dim())[0]
+    }
+
     /// Get the owned support cells.
     ///
     /// The owned support cells are sorted in ascending order by global cell index.
@@ -181,6 +186,14 @@ impl<
         global_dof_numbers: Vec<usize>,
         ownership: Vec<Ownership>,
     ) -> Self {
+        let tdim = grid.topology_dim();
+        assert_eq!(
+            grid.entity_types(tdim).len(),
+            1,
+            "Only single cell type grids are supported. Grid has {} cell types.",
+            grid.entity_types(tdim).len()
+        );
+
         let cell_count = grid
             .entity_types(grid.topology_dim())
             .iter()

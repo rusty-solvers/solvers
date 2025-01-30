@@ -9,6 +9,8 @@ use rlst::{
     OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
 
+use crate::{evaluator_tools::grid_points_from_space, function::FunctionSpaceTrait};
+
 /// Wrapper for a dense Green's function evaluator.
 pub struct DenseEvaluator<
     'a,
@@ -20,7 +22,7 @@ pub struct DenseEvaluator<
 {
     sources: Vec<T::Real>,
     targets: Vec<T::Real>,
-    eval_mode: GreenKernelEvalType,
+    eval_type: GreenKernelEvalType,
     use_multithreaded: bool,
     kernel: K,
     domain_space: Rc<DistributedArrayVectorSpace<'a, C, T>>,
@@ -51,7 +53,7 @@ where
     pub fn new(
         sources: &[T::Real],
         targets: &[T::Real],
-        eval_mode: GreenKernelEvalType,
+        eval_type: GreenKernelEvalType,
         use_multithreaded: bool,
         kernel: K,
         comm: &'a C,
@@ -83,12 +85,34 @@ where
         Self {
             sources: sources.to_vec(),
             targets: targets.to_vec(),
-            eval_mode,
+            eval_type,
             kernel,
             use_multithreaded,
             domain_space,
             range_space,
         }
+    }
+
+    /// Create a new dense assembler from a trial space and test space.
+    pub fn from_spaces<Space: FunctionSpaceTrait<T = T, C = C>>(
+        trial_space: &'a Space,
+        test_space: &'a Space,
+        eval_type: GreenKernelEvalType,
+        use_multithreaded: bool,
+        kernel: K,
+        quad_points: &[T::Real],
+    ) -> Self {
+        let source_points = grid_points_from_space(trial_space, quad_points);
+        let target_points = grid_points_from_space(test_space, quad_points);
+
+        Self::new(
+            &source_points,
+            &target_points,
+            eval_type,
+            use_multithreaded,
+            kernel,
+            trial_space.comm(),
+        )
     }
 }
 
@@ -134,7 +158,7 @@ where
         charges.fill_from(x.view().local().r().scalar_mul(alpha));
 
         self.kernel.evaluate_distributed(
-            self.eval_mode,
+            self.eval_type,
             self.sources.as_slice(),
             self.targets.as_slice(),
             charges.data(),

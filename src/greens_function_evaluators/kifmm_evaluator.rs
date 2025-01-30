@@ -4,7 +4,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use bempp_distributed_tools::{self, permutation::DataPermutation};
 
-use green_kernels::laplace_3d::Laplace3dKernel;
+use green_kernels::{laplace_3d::Laplace3dKernel, types::GreenKernelEvalType};
 use kifmm::{
     traits::{
         fftw::{Dft, DftType},
@@ -27,6 +27,8 @@ use rlst::{
     operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, Element,
     IndexLayout, MatrixSvd, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
+
+use crate::{evaluator_tools::grid_points_from_space, function::FunctionSpaceTrait};
 
 /// This structure instantiates an FMM evaluator.
 pub struct KiFmmEvaluator<'a, C: Communicator, T: RlstScalar + Equivalence>
@@ -133,6 +135,7 @@ where
                     &vec![T::zero(); n_sources],
                     expansion_order,
                     Laplace3dKernel::<T::Real>::default(),
+                    GreenKernelEvalType::Value,
                     FftFieldTranslation::<T>::new(None),
                 )
                 .unwrap()
@@ -156,6 +159,29 @@ where
             n_permuted_targets: target_indices.len(),
             fmm: cell,
         }
+    }
+
+    /// Initiate a new kifmm assembler from trial and test spaces
+    pub fn from_spaces<Space: FunctionSpaceTrait<T = T, C = C>>(
+        trial_space: &'a Space,
+        test_space: &'a Space,
+        _eval_type: GreenKernelEvalType,
+        local_tree_depth: usize,
+        global_tree_depth: usize,
+        expansion_order: usize,
+        quad_points: &[T::Real],
+    ) -> Self {
+        let source_points = grid_points_from_space(trial_space, quad_points);
+        let target_points = grid_points_from_space(test_space, quad_points);
+
+        Self::new(
+            &source_points,
+            &target_points,
+            local_tree_depth,
+            global_tree_depth,
+            expansion_order,
+            trial_space.comm(),
+        )
     }
 }
 

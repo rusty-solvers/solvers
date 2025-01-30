@@ -12,14 +12,16 @@ use crate::function::{FunctionSpaceTrait, LocalFunctionSpaceTrait};
 use bempp_quadrature::duffy::{
     quadrilateral_duffy, quadrilateral_triangle_duffy, triangle_duffy, triangle_quadrilateral_duffy,
 };
-use bempp_quadrature::types::{CellToCellConnectivity, TestTrialNumericalQuadratureDefinition};
+use bempp_quadrature::types::{
+    CellToCellConnectivity, NumericalQuadratureDefinition, TestTrialNumericalQuadratureDefinition,
+};
 use green_kernels::traits::Kernel;
 use integrands::BoundaryIntegrand;
 use itertools::izip;
 use mpi::traits::{Communicator, Equivalence};
 use ndelement::quadrature::simplex_rule;
 use ndelement::reference_cell;
-use ndelement::traits::FiniteElement;
+use ndelement::traits::{FiniteElement, QuadratureRule};
 use ndelement::types::ReferenceCellType;
 use ndgrid::traits::{Entity, Grid, Topology};
 use ndgrid::types::Ownership;
@@ -97,6 +99,26 @@ impl BoundaryAssemblerOptions {
     /// Set the batch size.
     pub fn get_batch_size(&self) -> usize {
         self.batch_size
+    }
+
+    /// Get the regular quadrature rule.
+    pub fn get_regular_quadrature_rule(
+        &self,
+        cell_type: ReferenceCellType,
+    ) -> NumericalQuadratureDefinition {
+        match cell_type {
+            ReferenceCellType::Triangle => bempp_quadrature::simplex_rules::simplex_rule_triangle(
+                self.get_regular_quadrature_degree(cell_type).unwrap(),
+            )
+            .unwrap(),
+            ReferenceCellType::Quadrilateral => {
+                bempp_quadrature::simplex_rules::simplex_rule_quadrilateral(
+                    self.get_regular_quadrature_degree(cell_type).unwrap(),
+                )
+                .unwrap()
+            }
+            _ => panic!("Quadrature rules not implemented for cell type."),
+        }
     }
 }
 

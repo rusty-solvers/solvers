@@ -106,10 +106,10 @@ fn main() {
     let qrule = bempp_quadrature::simplex_rules::simplex_rule_triangle(quad_degree).unwrap();
 
     let space_to_point =
-        bempp::evaluator_tools::basis_to_point_map(&space, &qrule.points, &qrule.weights, false);
+        bempp::evaluator_tools::space_to_point_map(&space, &qrule.points, &qrule.weights, false);
 
     let point_to_space =
-        bempp::evaluator_tools::basis_to_point_map(&space, &qrule.points, &qrule.weights, true);
+        bempp::evaluator_tools::space_to_point_map(&space, &qrule.points, &qrule.weights, true);
 
     // We now have to get all the points from the grid. We do this by iterating through all cells.
 
