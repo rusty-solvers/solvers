@@ -21,7 +21,7 @@ use itertools::izip;
 use mpi::traits::{Communicator, Equivalence};
 use ndelement::quadrature::simplex_rule;
 use ndelement::reference_cell;
-use ndelement::traits::{FiniteElement, QuadratureRule};
+use ndelement::traits::FiniteElement;
 use ndelement::types::ReferenceCellType;
 use ndgrid::traits::{Entity, Grid, Topology};
 use ndgrid::types::Ownership;

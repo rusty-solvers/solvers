@@ -229,13 +229,13 @@ pub struct NeighbourEvaluator<'a, Space: FunctionSpaceTrait, K: Kernel<T = Space
 
 impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<'a, Space, K> {
     /// Create a new neighbour evaluator.
-    pub fn new(
+    pub fn from_spaces_and_kernel(
         source_space: &'a Space,
         target_space: &'a Space,
         eval_points: &[<Space::T as RlstScalar>::Real],
         kernel: K,
         eval_type: GreenKernelEvalType,
-    ) -> Self {
+    ) -> Operator<Self> {
         assert!(
             std::ptr::addr_eq(source_space.grid(), target_space.grid()),
             "Source and target space must have the same grid."
@@ -311,7 +311,7 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
             .map(|(i, d)| (*d, i))
             .collect();
 
-        Self {
+        Operator::new(Self {
             source_space,
             target_space,
             eval_points: eval_points.to_vec(),
@@ -323,7 +323,7 @@ impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<
             global_to_local_mapper,
             index_embedding,
             cell_to_position,
-        }
+        })
     }
 
     fn communicate_dofs(&self, x: &DistributedVector<'_, Space::C, Space::T>) -> Vec<Space::T> {

@@ -3,13 +3,7 @@
 use green_kernels::laplace_3d::Laplace3dKernel;
 use itertools::Itertools;
 use ndgrid::traits::Grid;
-use rlst::{
-    operator::{
-        interface::{DistributedArrayVectorSpace, DistributedArrayVectorSpaceElement},
-        Operator,
-    },
-    prelude::*,
-};
+use rlst::prelude::*;
 
 use crate::{
     boundary_assemblers::BoundaryAssemblerOptions,
@@ -38,7 +32,6 @@ pub fn single_layer<
     >,
 >
 where
-    // Laplace Operators are only defined for real types
     Space::T: MatrixInverse + RlstScalar<Real = Space::T>,
     Space::LocalFunctionSpace: Sync,
     Space::LocalGrid: Sync,
@@ -67,13 +60,13 @@ where
 
     // And the neighbour correction
 
-    let correction = Operator::new(NeighbourEvaluator::new(
+    let correction = NeighbourEvaluator::from_spaces_and_kernel(
         trial_space,
         test_space,
         &quad_points,
         Laplace3dKernel::default(),
         green_kernels::types::GreenKernelEvalType::Value,
-    ));
+    );
 
     // We also need the sparse matrix with the actual singular integrals
 

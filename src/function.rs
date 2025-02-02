@@ -17,7 +17,7 @@ use num::Zero;
 use rlst::operator::interface::DistributedArrayVectorSpace;
 use rlst::{
     rlst_array_from_slice2, rlst_array_from_slice_mut2, rlst_dynamic_array4, AsApply, IndexLayout,
-    MatrixInverse, OperatorBase, PrettyPrint, RawAccess, RawAccessMut, RlstScalar,
+    MatrixInverse, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
 use std::collections::HashMap;
 use std::rc::Rc;

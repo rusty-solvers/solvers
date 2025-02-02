@@ -2,24 +2,16 @@
 
 use bempp::{
     boundary_assemblers::BoundaryAssemblerOptions,
-    evaluator_tools::NeighbourEvaluator,
     function::{FunctionSpaceTrait, LocalFunctionSpaceTrait, SpaceEvaluator},
     laplace,
 };
 use green_kernels::laplace_3d::Laplace3dKernel;
 use itertools::izip;
-use mpi::traits::{Communicator, CommunicatorCollectives, Equivalence};
+use mpi::traits::{Communicator, Equivalence};
 use ndelement::{ciarlet::LagrangeElementFamily, types::ReferenceCellType};
-use ndgrid::traits::{Geometry, GeometryMap, Grid, ParallelGrid};
+use ndgrid::traits::{GeometryMap, Grid, ParallelGrid};
 use num::{One, Zero};
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 use rlst::prelude::*;
-use rlst::{
-    operator::{zero_element, Operator},
-    rlst_dynamic_array1, rlst_dynamic_array2, AsApply, DistributedVector, MultInto, OperatorBase,
-    RawAccessMut, RlstScalar,
-};
 
 // Sample a function on a continuous P1 grid
 fn sample_function<'a, T: RlstScalar + Equivalence, Space: FunctionSpaceTrait<T = T>>(
@@ -72,13 +64,13 @@ fn main() {
 
     let refinement_level = 5;
 
-    let mut rng = ChaCha8Rng::seed_from_u64(world.rank() as u64);
-
     let grid = bempp::shapes::regular_sphere::<f64, _>(refinement_level, 1, &world);
-    println!(
-        "Number of elements: {}",
-        grid.cell_layout().number_of_global_indices()
-    );
+    if rank == 0 {
+        println!(
+            "Number of elements: {}",
+            grid.cell_layout().number_of_global_indices()
+        );
+    }
 
     let quad_degree = 6;
     // Get the number of cells in the grid.
@@ -91,57 +83,26 @@ fn main() {
     let mut options = BoundaryAssemblerOptions::default();
     options.set_regular_quadrature_degree(ReferenceCellType::Triangle, quad_degree);
 
-    let quad_degree = options
-        .get_regular_quadrature_degree(ReferenceCellType::Triangle)
-        .unwrap();
-
-    let assembler = bempp::laplace::assembler::single_layer::<f64>(&options);
-
-    //let dense_matrix = assembler.assemble(&space, &space);
-
-    // Now let's build an evaluator.
-
-    // Instantiate function spaces.
-
-    let qrule = bempp_quadrature::simplex_rules::simplex_rule_triangle(quad_degree).unwrap();
-
-    let space_to_point =
-        bempp::evaluator_tools::space_to_point_map(&space, &qrule.points, &qrule.weights, false);
-
-    let point_to_space =
-        bempp::evaluator_tools::space_to_point_map(&space, &qrule.points, &qrule.weights, true);
+    let qrule = options.get_regular_quadrature_rule(ReferenceCellType::Triangle);
 
     // We now have to get all the points from the grid. We do this by iterating through all cells.
 
-    let points = bempp::evaluator_tools::grid_points_from_space(&space, &qrule.points);
+    let kernel_evaluator =
+        bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::from_spaces(
+            &space,
+            &space,
+            green_kernels::types::GreenKernelEvalType::Value,
+            true,
+            Laplace3dKernel::new(),
+            &qrule.points,
+        );
 
-    // let kernel_evaluator = bempp::greens_function_evaluators::dense_evaluator::DenseEvaluator::new(
-    //     &points,
-    //     &points,
-    //     green_kernels::types::GreenKernelEvalType::Value,
-    //     true,
-    //     Laplace3dKernel::default(),
-    //     &world,
+    // let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
+    //     &points, &points, 1, 3, 5, &world,
     // );
 
-    let kernel_evaluator = bempp::greens_function_evaluators::kifmm_evaluator::KiFmmEvaluator::new(
-        &points, &points, 1, 3, 5, &world,
-    );
-
-    let correction = NeighbourEvaluator::new(
-        &space,
-        &qrule.points,
-        Laplace3dKernel::default(),
-        green_kernels::types::GreenKernelEvalType::Value,
-    );
-
-    let corrected_evaluator = kernel_evaluator.r().sum(correction.r().scale(-1.0));
-
-    let prod1 = corrected_evaluator.r().product(space_to_point.r());
-
-    let singular_operator = Operator::from(assembler.assemble_singular(&space, &space));
-
-    let laplace_evaluator = (point_to_space.product(prod1)).sum(singular_operator.r());
+    let laplace_evaluator =
+        bempp::laplace::evaluator::single_layer(&space, &space, kernel_evaluator.r(), &options);
 
     let mut x = zero_element(laplace_evaluator.domain());
 
@@ -157,18 +118,12 @@ fn main() {
 
     let evaluated_result = evaluator.apply(res.r());
 
-    println!("Finished parallel evaluation.");
-
     // We now evaluate the dense operator on just the root process and compare the results.
 
     if rank == 0 {
         let self_comm = mpi::topology::SimpleCommunicator::self_comm();
 
         let grid = bempp::shapes::regular_sphere::<f64, _>(refinement_level, 1, &self_comm);
-        println!(
-            "Number of elements: {}",
-            grid.cell_layout().number_of_global_indices()
-        );
 
         let space = bempp::function::FunctionSpace::new(
             &grid,

@@ -31,7 +31,8 @@ fn main() {
 
     let qrule = bempp_quadrature::simplex_rules::simplex_rule_triangle(quad_degree).unwrap();
 
-    let neighbour_evaluator = NeighbourEvaluator::new(
+    let neighbour_evaluator = NeighbourEvaluator::from_spaces_and_kernel(
+        &space,
         &space,
         &qrule.points,
         Laplace3dKernel::default(),

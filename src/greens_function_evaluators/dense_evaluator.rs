@@ -5,8 +5,8 @@ use std::rc::Rc;
 use green_kernels::{traits::DistributedKernelEvaluator, types::GreenKernelEvalType};
 use mpi::traits::{Communicator, Equivalence};
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, IndexLayout,
-    OperatorBase, RawAccess, RawAccessMut, RlstScalar,
+    operator::{interface::DistributedArrayVectorSpace, Operator},
+    rlst_dynamic_array1, AsApply, IndexLayout, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
 };
 
 use crate::{evaluator_tools::grid_points_from_space, function::FunctionSpaceTrait};
@@ -101,18 +101,18 @@ where
         use_multithreaded: bool,
         kernel: K,
         quad_points: &[T::Real],
-    ) -> Self {
+    ) -> Operator<Self> {
         let source_points = grid_points_from_space(trial_space, quad_points);
         let target_points = grid_points_from_space(test_space, quad_points);
 
-        Self::new(
+        Operator::new(Self::new(
             &source_points,
             &target_points,
             eval_type,
             use_multithreaded,
             kernel,
             trial_space.comm(),
-        )
+        ))
     }
 }
 

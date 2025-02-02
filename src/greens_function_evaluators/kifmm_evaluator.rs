@@ -24,8 +24,9 @@ use kifmm::{
 use mpi::traits::{Communicator, Equivalence};
 use num::Float;
 use rlst::{
-    operator::interface::DistributedArrayVectorSpace, rlst_dynamic_array1, AsApply, Element,
-    IndexLayout, MatrixSvd, OperatorBase, RawAccess, RawAccessMut, RlstScalar,
+    operator::{interface::DistributedArrayVectorSpace, Operator},
+    rlst_dynamic_array1, AsApply, Element, IndexLayout, MatrixSvd, OperatorBase, RawAccess,
+    RawAccessMut, RlstScalar,
 };
 
 use crate::{evaluator_tools::grid_points_from_space, function::FunctionSpaceTrait};
@@ -170,18 +171,18 @@ where
         global_tree_depth: usize,
         expansion_order: usize,
         quad_points: &[T::Real],
-    ) -> Self {
+    ) -> Operator<Self> {
         let source_points = grid_points_from_space(trial_space, quad_points);
         let target_points = grid_points_from_space(test_space, quad_points);
 
-        Self::new(
+        Operator::new(Self::new(
             &source_points,
             &target_points,
             local_tree_depth,
             global_tree_depth,
             expansion_order,
             trial_space.comm(),
-        )
+        ))
     }
 }
 
