@@ -2,10 +2,10 @@
 
 //mod function_space;
 
-use bempp_distributed_tools::{DataPermutation, Global2LocalDataMapper};
+use bempp_distributed_tools::{all_to_allv, DataPermutation, Global2LocalDataMapper};
 use itertools::{izip, Itertools};
-use mpi::request::WaitGuard;
-use mpi::traits::{Communicator, Destination, Equivalence, Source};
+use mpi::collective::SystemOperation;
+use mpi::traits::{Communicator, CommunicatorCollectives, Equivalence, Root};
 use ndelement::ciarlet::CiarletElement;
 use ndelement::traits::ElementFamily;
 use ndelement::{traits::FiniteElement, types::ReferenceCellType};
@@ -381,9 +381,15 @@ where
         let size = comm.size();
 
         // Create local space on current process
+
+        // cell_dofs is all the dofs attached to each cell
+        // Entity dofs has entities sorted by dimension and entities
+        // dofmap_size is the number of all dofs
+        // owner_data contains owning process, cell and local cell index of each dof
         let (cell_dofs, entity_dofs, dofmap_size, owner_data) =
             assign_dofs(rank as usize, grid.local_grid(), e_family);
 
+        // Map from reference cell type to actual element
         let mut elements = HashMap::new();
         for cell in grid
             .local_grid()
@@ -392,105 +398,133 @@ where
             elements.insert(*cell, e_family.element(*cell));
         }
 
-        // Assign global DOF numbers
+        // This arrays will hold the final global dof numbers
         let mut global_dof_numbers = vec![0; dofmap_size];
+        // This array will contain the final ownership data.
+        // First we set everything to owned. We later correct for the ghost dofs.
+        let mut ownership = vec![Ownership::Owned; dofmap_size];
+        // The following stores the rank of each ghost
+        let mut ghost_ranks = Vec::new();
+
+        // We need those temporary arrays to store the ghost information
+        // for MPI communication
         let mut ghost_indices = vec![vec![]; size as usize];
         let mut ghost_dims = vec![vec![]; size as usize];
         let mut ghost_entities = vec![vec![]; size as usize];
         let mut ghost_entity_dofs = vec![vec![]; size as usize];
 
-        let local_offset = if rank == 0 {
-            0
-        } else {
-            let (value, _status) = comm.process_at_rank(rank - 1).receive::<usize>();
-            value
-        };
+        // Each process counts its own local dofs and then we compute the offset
+        // from each process and the global number of dofs.
+
+        let number_of_owned_dofs = owner_data
+            .iter()
+            .filter(|data| data.0 == rank as usize)
+            .count();
+
+        // We now have the local number of dofs. We use an mpi exclusive sum to compute the local offset
+
+        let mut local_offset = 0;
+
+        comm.exclusive_scan_into(
+            &number_of_owned_dofs,
+            &mut local_offset,
+            SystemOperation::sum(),
+        );
+
+        // We now have the number of owned dofs and the local offset
+
+        // `dof_n` assigns the actual dof number
         let mut dof_n = local_offset;
-        let mut number_of_owned_dofs = 0;
+
+        // We can now fill the global dof numbers of the owned dofs
+        // and prepare the ghost dof information for communication.
+
         for (i, ownership) in owner_data.iter().enumerate() {
             if ownership.0 == rank as usize {
                 global_dof_numbers[i] = dof_n;
                 dof_n += 1;
-                number_of_owned_dofs += 1;
             } else {
+                ghost_ranks.push(ownership.0);
                 ghost_indices[ownership.0].push(i);
                 ghost_dims[ownership.0].push(ownership.1);
                 ghost_entities[ownership.0].push(ownership.2);
                 ghost_entity_dofs[ownership.0].push(ownership.3);
             }
         }
-        if rank < size - 1 {
-            mpi::request::scope(|scope| {
-                let _ =
-                    WaitGuard::from(comm.process_at_rank(rank + 1).immediate_send(scope, &dof_n));
-            });
-        }
 
-        let global_size = if rank == size - 1 {
-            for p in 0..rank {
-                mpi::request::scope(|scope| {
-                    let _ = WaitGuard::from(comm.process_at_rank(p).immediate_send(scope, &dof_n));
-                });
+        // We want to get the counts of how much data there is for each process and then
+        // convert the various `ghost_..` vec of vecs into flat buffers that can be communicated.
+
+        let counts = ghost_indices.iter().map(|dofs| dofs.len()).collect_vec();
+
+        // We have the counts. Let's now flatten the ghost arrays.
+
+        let ghost_indices = ghost_indices.into_iter().flatten().collect_vec();
+        let ghost_dims = ghost_dims.into_iter().flatten().collect_vec();
+        let ghost_entities = ghost_entities.into_iter().flatten().collect_vec();
+        let ghost_entity_dofs = ghost_entity_dofs.into_iter().flatten().collect_vec();
+
+        assert_eq!(dof_n, local_offset + number_of_owned_dofs);
+
+        // We now communicate the global size back to all processes. The global size is the `dof_n` value
+        // on the last process
+
+        let global_size = {
+            let mut tmp = 0;
+            if rank == comm.size() - 1 {
+                comm.this_process().scatter_into_root(&dof_n, &mut tmp);
+            } else {
+                comm.process_at_rank(comm.size() - 1).scatter_into(&mut tmp);
             }
-            dof_n
-        } else {
-            let (gs, _status) = comm.process_at_rank(size - 1).receive::<usize>();
-            gs
+
+            tmp
         };
 
-        // Communicate information about ghosts
-        // send requests for ghost info
-        for p in 0..size {
-            if p != rank {
-                mpi::request::scope(|scope| {
-                    let process = comm.process_at_rank(p);
-                    let _ = WaitGuard::from(process.immediate_send(scope, &ghost_dims[p as usize]));
-                    let _ =
-                        WaitGuard::from(process.immediate_send(scope, &ghost_entities[p as usize]));
-                    let _ = WaitGuard::from(
-                        process.immediate_send(scope, &ghost_entity_dofs[p as usize]),
-                    );
-                });
-            }
-        }
-        // accept requests and send ghost info
-        for p in 0..size {
-            if p != rank {
-                let process = comm.process_at_rank(p);
-                let (gdims, _status) = process.receive_vec::<usize>();
-                let (gentities, _status) = process.receive_vec::<usize>();
-                let (gentity_dofs, _status) = process.receive_vec::<usize>();
-                let local_ghost_dofs = gdims
-                    .iter()
-                    .zip(gentities.iter().zip(&gentity_dofs))
-                    .map(|(c, (e, d))| entity_dofs[*c][*e][*d])
-                    .collect::<Vec<_>>();
-                let global_ghost_dofs = local_ghost_dofs
-                    .iter()
-                    .map(|i| global_dof_numbers[*i])
-                    .collect::<Vec<_>>();
-                mpi::request::scope(|scope| {
-                    let _ = WaitGuard::from(process.immediate_send(scope, &local_ghost_dofs));
-                    let _ = WaitGuard::from(process.immediate_send(scope, &global_ghost_dofs));
-                });
-            }
-        }
+        // We now need to communicate all the data about ghosts across processes.
+        // Each process needs to send to all other processes the ghost dofs it has from them.
+        // We only need to get the `receive_count` once since it is identical for all calls.
 
-        // receive ghost info
-        let mut ownership = vec![Ownership::Owned; dofmap_size];
-        for p in 0..size {
-            if p != rank {
-                let process = comm.process_at_rank(p);
-                let (local_ghost_dofs, _status) = process.receive_vec::<usize>();
-                let (global_ghost_dofs, _status) = process.receive_vec::<usize>();
-                for (i, (l, g)) in ghost_indices[p as usize]
-                    .iter()
-                    .zip(local_ghost_dofs.iter().zip(&global_ghost_dofs))
-                {
-                    global_dof_numbers[*i] = *g;
-                    ownership[*i] = Ownership::Ghost(p as usize, *l);
-                }
+        let (receive_count, received_ghost_dims) = all_to_allv(comm, &counts, &ghost_dims);
+        let (_, received_ghost_entities) = all_to_allv(comm, &counts, &ghost_entities);
+        let (_, received_ghost_entity_dofs) = all_to_allv(comm, &counts, &ghost_entity_dofs);
+
+        // Each process has now received from all other processes the ghost elements that they have from them.
+        // We now need to look up the actual entity dof numbers and send those back.
+        // First store the entity dof numbers.
+
+        let (ghost_global_dofs, ghost_local_dofs) = {
+            let mut ghost_global_dofs_to_send =
+                Vec::<usize>::with_capacity(receive_count.iter().sum());
+            let mut ghost_local_dofs_to_send =
+                Vec::<usize>::with_capacity(receive_count.iter().sum());
+
+            for (dim, entity, entity_dof) in izip!(
+                received_ghost_dims,
+                received_ghost_entities,
+                received_ghost_entity_dofs
+            ) {
+                let local_index = entity_dofs[dim][entity][entity_dof];
+                ghost_global_dofs_to_send.push(global_dof_numbers[local_index]);
+                ghost_local_dofs_to_send.push(local_index);
             }
+
+            (
+                // Have a .1 at the end of both since we only want the data and not the counts
+                all_to_allv(comm, &receive_count, &ghost_global_dofs_to_send).1,
+                all_to_allv(comm, &receive_count, &ghost_local_dofs_to_send).1,
+            )
+        };
+
+        // We have the global dofs of the ghosts now. We can finalise setting up the `ownership` and `ghobal_dof_numbers` arrays.
+
+        for (&index, &ghost_rank, &ghost_global_dof, &ghost_local_dof) in izip!(
+            ghost_indices.iter(),
+            ghost_ranks.iter(),
+            ghost_global_dofs.iter(),
+            ghost_local_dofs.iter()
+        ) {
+            global_dof_numbers[index] = ghost_global_dof;
+            ownership[index] = Ownership::Ghost(ghost_rank, ghost_local_dof);
         }
 
         Self {
@@ -507,18 +541,6 @@ where
             ),
             index_layout: Rc::new(IndexLayout::from_local_counts(number_of_owned_dofs, comm)),
         }
-
-        // Self {
-        //     grid,
-        //     elements,
-        //     entity_dofs,
-        //     cell_dofs,
-        //     local_size: dofmap_size,
-        //     global_size,
-        //     global_dof_numbers,
-        //     ownership,
-        //     _marker: PhantomData,
-        // }
     }
 }
 
@@ -577,7 +599,8 @@ pub fn assign_dofs<
         element_dims.insert(*cell, elements[cell].dim());
     }
 
-    let entity_counts = (0..tdim + 1)
+    // Gets the global number of all entities in the grid for each dimension
+    let entity_counts = (0..=tdim)
         .map(|d| {
             grid.entity_types(d)
                 .iter()
@@ -585,46 +608,74 @@ pub fn assign_dofs<
                 .sum::<usize>()
         })
         .collect::<Vec<_>>();
+    // Th method does not work for three-dimensional entities
     if tdim > 2 {
         unimplemented!("DOF maps not implemented for cells with tdim > 2.");
     }
 
-    for d in 0..tdim + 1 {
+    // This will hold the dofs for each dimension
+    for d in 0..=tdim {
         entity_dofs[d] = vec![vec![]; entity_counts[d]];
     }
+    // The dofs attached to the cells
     let mut cell_dofs = vec![vec![]; entity_counts[tdim]];
 
-    let mut max_rank = rank;
+    // let mut max_rank = rank;
+    // for cell in grid.entity_iter(tdim) {
+    //     if let Ownership::Ghost(process, _index) = cell.ownership() {
+    //         if process > max_rank {
+    //             max_rank = process;
+    //         }
+    //     }
+    // }
+
+    // Now comes the big loop
+    // We iterate through each cell in the grid
     for cell in grid.entity_iter(tdim) {
-        if let Ownership::Ghost(process, _index) = cell.ownership() {
-            if process > max_rank {
-                max_rank = process;
-            }
-        }
-    }
-    for cell in grid.entity_iter(tdim) {
+        // We assign a zero vec to `cell_dofs[cell.local_index]` which has
+        // as many entries as there are dofs attached to the cell.
         cell_dofs[cell.local_index()] = vec![0; element_dims[&cell.entity_type()]];
+
+        // Get the finite element for the current cell type. This is not the geometric
+        //  element but the element that defines the function space.
         let element = &elements[&cell.entity_type()];
+        // Get the cell topology
         let topology = cell.topology();
 
         // Assign DOFs to entities
+        // take everything from `entity_dofs` up to dimension `tdim`
         for (d, edofs_d) in entity_dofs.iter_mut().take(tdim + 1).enumerate() {
+            // Iterate through all sub entities of dimension d in the cell
+            // i is count of subentity, e is its actual index
             for (i, e) in topology.sub_entity_iter(d).enumerate() {
+                // Get the element dofs that are associated with the subentity
+                //  e.g. the dofs that are associated with each vertex.
                 let e_dofs = element.entity_dofs(d, i).unwrap();
+                // Only do the rest if the entity is not empty
                 if !e_dofs.is_empty() {
+                    // edofs_d[e] is the vector of entities of dimension d attached to cell e.
                     if edofs_d[e].is_empty() {
+                        // We go through the dofs for the reference element
                         for (dof_i, _d) in e_dofs.iter().enumerate() {
+                            // size is the count for the total number of dofs
                             edofs_d[e].push(size);
+                            // Check if the cell is a ghost.
                             if let Ownership::Ghost(process, index) =
                                 grid.entity(d, e).unwrap().ownership()
                             {
+                                // The dof belongs to process d and lives on element `index`
+                                //  and there is the local dof `dof_i`. This is the same as
+                                // `dof_i` on our process.
                                 owner_data.push((process, d, index, dof_i));
                             } else {
+                                // Otherwise the owning data is our own process.
                                 owner_data.push((rank, d, e, dof_i));
                             }
                             size += 1;
                         }
                     }
+                    // cell dofs has all dofs associated with the cell. We are associating
+                    // the local dof index of the cell with the global dof indices in edofs_d[e].
                     for (local_dof, dof) in e_dofs.iter().zip(&edofs_d[e]) {
                         cell_dofs[cell.local_index()][*local_dof] = *dof;
                     }
@@ -632,6 +683,10 @@ pub fn assign_dofs<
             }
         }
     }
+    // Cell dofs has all the dofs attached to the cell
+    // entity_dofs has the same but ordered by subentity dimension
+    // The owner data stores where the dof originates. dof owners
+    // are always the owners of the corresponding entity.
     (cell_dofs, entity_dofs, size, owner_data)
 }
 
