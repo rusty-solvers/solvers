@@ -452,18 +452,7 @@ where
             }
         }
 
-        // We want to get the counts of how much data there is for each process and then
-        // convert the various `ghost_..` vec of vecs into flat buffers that can be communicated.
-
-        let counts = ghost_indices.iter().map(|dofs| dofs.len()).collect_vec();
-
-        // We have the counts. Let's now flatten the ghost arrays.
-
-        let ghost_indices = ghost_indices.into_iter().flatten().collect_vec();
-        let ghost_dims = ghost_dims.into_iter().flatten().collect_vec();
-        let ghost_entities = ghost_entities.into_iter().flatten().collect_vec();
-        let ghost_entity_dofs = ghost_entity_dofs.into_iter().flatten().collect_vec();
-
+        // This is to make sure that `dof_n` agrees with the sum of the offset and number of owned dofs
         assert_eq!(dof_n, local_offset + number_of_owned_dofs);
 
         // We now communicate the global size back to all processes. The global size is the `dof_n` value
@@ -480,51 +469,68 @@ where
             tmp
         };
 
-        // We now need to communicate all the data about ghosts across processes.
-        // Each process needs to send to all other processes the ghost dofs it has from them.
-        // We only need to get the `receive_count` once since it is identical for all calls.
+        // Everything below is only necessary if there is more than one process. Otherwise,
+        // ownership and `global_dof_numbers` are already correctly filled.
 
-        let (receive_count, received_ghost_dims) = all_to_allv(comm, &counts, &ghost_dims);
-        let (_, received_ghost_entities) = all_to_allv(comm, &counts, &ghost_entities);
-        let (_, received_ghost_entity_dofs) = all_to_allv(comm, &counts, &ghost_entity_dofs);
+        if comm.size() > 1 {
+            // We want to get the counts of how much data there is for each process and then
+            // convert the various `ghost_..` vec of vecs into flat buffers that can be communicated.
 
-        // Each process has now received from all other processes the ghost elements that they have from them.
-        // We now need to look up the actual entity dof numbers and send those back.
-        // First store the entity dof numbers.
+            let counts = ghost_indices.iter().map(|dofs| dofs.len()).collect_vec();
 
-        let (ghost_global_dofs, ghost_local_dofs) = {
-            let mut ghost_global_dofs_to_send =
-                Vec::<usize>::with_capacity(receive_count.iter().sum());
-            let mut ghost_local_dofs_to_send =
-                Vec::<usize>::with_capacity(receive_count.iter().sum());
+            // We have the counts. Let's now flatten the ghost arrays.
 
-            for (dim, entity, entity_dof) in izip!(
-                received_ghost_dims,
-                received_ghost_entities,
-                received_ghost_entity_dofs
+            let ghost_indices = ghost_indices.into_iter().flatten().collect_vec();
+            let ghost_dims = ghost_dims.into_iter().flatten().collect_vec();
+            let ghost_entities = ghost_entities.into_iter().flatten().collect_vec();
+            let ghost_entity_dofs = ghost_entity_dofs.into_iter().flatten().collect_vec();
+
+            // We now need to communicate all the data about ghosts across processes.
+            // Each process needs to send to all other processes the ghost dofs it has from them.
+            // We only need to get the `receive_count` once since it is identical for all calls.
+
+            let (receive_count, received_ghost_dims) = all_to_allv(comm, &counts, &ghost_dims);
+            let (_, received_ghost_entities) = all_to_allv(comm, &counts, &ghost_entities);
+            let (_, received_ghost_entity_dofs) = all_to_allv(comm, &counts, &ghost_entity_dofs);
+
+            // Each process has now received from all other processes the ghost elements that they have from them.
+            // We now need to look up the actual entity dof numbers and send those back.
+            // First store the entity dof numbers.
+
+            let (ghost_global_dofs, ghost_local_dofs) = {
+                let mut ghost_global_dofs_to_send =
+                    Vec::<usize>::with_capacity(receive_count.iter().sum());
+                let mut ghost_local_dofs_to_send =
+                    Vec::<usize>::with_capacity(receive_count.iter().sum());
+
+                for (dim, entity, entity_dof) in izip!(
+                    received_ghost_dims,
+                    received_ghost_entities,
+                    received_ghost_entity_dofs
+                ) {
+                    let local_index = entity_dofs[dim][entity][entity_dof];
+                    ghost_global_dofs_to_send.push(global_dof_numbers[local_index]);
+                    ghost_local_dofs_to_send.push(local_index);
+                }
+
+                (
+                    // Have a .1 at the end of both since we only want the data and not the counts
+                    all_to_allv(comm, &receive_count, &ghost_global_dofs_to_send).1,
+                    all_to_allv(comm, &receive_count, &ghost_local_dofs_to_send).1,
+                )
+            };
+
+            // We have the global dofs of the ghosts now. We can finalise setting up the `ownership` and `ghobal_dof_numbers` arrays.
+
+            for (&index, &ghost_rank, &ghost_global_dof, &ghost_local_dof) in izip!(
+                ghost_indices.iter(),
+                ghost_ranks.iter(),
+                ghost_global_dofs.iter(),
+                ghost_local_dofs.iter()
             ) {
-                let local_index = entity_dofs[dim][entity][entity_dof];
-                ghost_global_dofs_to_send.push(global_dof_numbers[local_index]);
-                ghost_local_dofs_to_send.push(local_index);
+                global_dof_numbers[index] = ghost_global_dof;
+                ownership[index] = Ownership::Ghost(ghost_rank, ghost_local_dof);
             }
-
-            (
-                // Have a .1 at the end of both since we only want the data and not the counts
-                all_to_allv(comm, &receive_count, &ghost_global_dofs_to_send).1,
-                all_to_allv(comm, &receive_count, &ghost_local_dofs_to_send).1,
-            )
-        };
-
-        // We have the global dofs of the ghosts now. We can finalise setting up the `ownership` and `ghobal_dof_numbers` arrays.
-
-        for (&index, &ghost_rank, &ghost_global_dof, &ghost_local_dof) in izip!(
-            ghost_indices.iter(),
-            ghost_ranks.iter(),
-            ghost_global_dofs.iter(),
-            ghost_local_dofs.iter()
-        ) {
-            global_dof_numbers[index] = ghost_global_dof;
-            ownership[index] = Ownership::Ghost(ghost_rank, ghost_local_dof);
         }
 
         Self {
