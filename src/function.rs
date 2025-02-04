@@ -509,6 +509,8 @@ where
                     received_ghost_entity_dofs
                 ) {
                     let local_index = entity_dofs[dim][entity][entity_dof];
+                    // Since we own the dof the corresponding entry in `global_dof_numbers` is already filled.
+                    // So we can use it to get the global dof number.
                     ghost_global_dofs_to_send.push(global_dof_numbers[local_index]);
                     ghost_local_dofs_to_send.push(local_index);
                 }

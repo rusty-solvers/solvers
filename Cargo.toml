@@ -1,7 +1,7 @@
 [features]
 sleef = ["rlst/sleef", "green-kernels/sleef", "ndelement/sleef", "ndgrid/sleef"]
 strict = []
-default = ["sleef"]
+default = []
 
 [package]
 name = "bempp"
