@@ -107,9 +107,6 @@ where
 
         let simple_comm = domain_space.index_layout().comm().duplicate();
 
-        println!("nsources {}", sources.len());
-        println!("ntargets {}", targets.len());
-
         let builder = MultiNodeBuilder::new(false)
             .tree(
                 &simple_comm,
