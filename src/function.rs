@@ -459,11 +459,12 @@ where
         // on the last process
 
         let global_size = {
-            let mut tmp = 0;
+            let mut tmp = dof_n;
             if rank == comm.size() - 1 {
-                comm.this_process().scatter_into_root(&dof_n, &mut tmp);
+                comm.this_process().broadcast_into(&mut tmp);
             } else {
-                comm.process_at_rank(comm.size() - 1).scatter_into(&mut tmp);
+                comm.process_at_rank(comm.size() - 1)
+                    .broadcast_into(&mut tmp);
             }
 
             tmp
