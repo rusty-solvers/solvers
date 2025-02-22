@@ -289,6 +289,9 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
 
         let mut pair_indices = HashMap::new();
 
+        let mut max_test_basis_fun = 0;
+        let mut max_trial_basis_fun = 0;
+
         for test_cell_type in grid.entity_types(2) {
             for trial_cell_type in grid.entity_types(2) {
                 let qdegree =
@@ -347,6 +350,7 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
                         }
                     }
                     let trial_element = trial_space.element(*trial_cell_type);
+                    max_trial_basis_fun = std::cmp::max(max_trial_basis_fun, trial_element.dim());
                     let mut table = rlst_dynamic_array4!(
                         T,
                         trial_element.tabulate_array_shape(self.table_derivs, points.shape()[1])
@@ -366,6 +370,7 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
                         }
                     }
                     let test_element = test_space.element(*test_cell_type);
+                    max_test_basis_fun = std::cmp::max(max_test_basis_fun, test_element.dim());
                     let mut table = rlst_dynamic_array4!(
                         T,
                         test_element.tabulate_array_shape(self.table_derivs, points.shape()[1])
@@ -392,6 +397,11 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
             self.options.batch_size,
         );
 
+        let npairs = cell_blocks
+            .iter()
+            .map(|(_first, second)| second.len())
+            .sum::<usize>();
+
         let map = cell_blocks.into_par_iter().map(|(i, cell_block)| {
             assemble_batch_singular(
                 self,
@@ -415,7 +425,12 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
         // `ParallelIterator` and not from the std::core Iterator
         ParallelIterator::reduce(
             map,
-            || SparseMatrixData::<T>::new(shape),
+            || {
+                SparseMatrixData::<T>::new_known_size(
+                    shape,
+                    max_trial_basis_fun * max_test_basis_fun * npairs,
+                )
+            },
             |mut a, b| {
                 a.add(b);
                 a
