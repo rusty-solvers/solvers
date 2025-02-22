@@ -14,6 +14,7 @@ use ndgrid::traits::{Entity, GeometryMap, Grid, ParallelGrid, Topology};
 
 use num::Zero;
 use rlst::{
+    measure_duration,
     operator::{
         interface::{
             distributed_sparse_operator::DistributedCsrMatrixOperatorImpl,
@@ -33,6 +34,7 @@ use crate::function::{FunctionSpaceTrait, LocalFunctionSpaceTrait};
 /// Create a linear operator from the map of a basis to points. The points are sorted by global
 /// index of the corresponding cells in the support. The output space is the space obtained through
 /// the owned support cells on each process.
+#[measure_duration(id = "space_to_point_map")]
 pub fn space_to_point_map<
     'a,
     T: RlstScalar + Equivalence,
@@ -229,6 +231,7 @@ pub struct NeighbourEvaluator<'a, Space: FunctionSpaceTrait, K: Kernel<T = Space
 
 impl<'a, K: Kernel<T = Space::T>, Space: FunctionSpaceTrait> NeighbourEvaluator<'a, Space, K> {
     /// Create a new neighbour evaluator.
+    #[measure_duration(id = "neighbour_evaluator_from_spaces_and_kernel")]
     pub fn from_spaces_and_kernel(
         source_space: &'a Space,
         target_space: &'a Space,
@@ -387,6 +390,7 @@ where
     Space::LocalGrid: Sync,
     for<'a> <Space::LocalGrid as Grid>::GeometryMap<'a>: Sync,
 {
+    #[measure_duration(id = "neighbour_evaluator_apply")]
     fn apply_extended<
         ContainerIn: rlst::ElementContainer<E = <Self::Domain as rlst::LinearSpace>::E>,
         ContainerOut: rlst::ElementContainerMut<E = <Self::Range as rlst::LinearSpace>::E>,

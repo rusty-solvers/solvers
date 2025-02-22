@@ -12,6 +12,7 @@ use crate::{
 };
 
 /// Implement a single layer operator
+#[measure_duration(id = "laplace_single_layer_evaluate")]
 #[allow(clippy::type_complexity)]
 pub fn single_layer<
     'a,

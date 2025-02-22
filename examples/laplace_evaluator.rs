@@ -62,6 +62,10 @@ fn main() {
     let world = universe.world();
     let rank = world.rank();
 
+    if rank == 0 {
+        env_logger::init();
+    }
+
     let refinement_level = 5;
 
     let grid = bempp::shapes::regular_sphere::<f64, _>(refinement_level, 1, &world);

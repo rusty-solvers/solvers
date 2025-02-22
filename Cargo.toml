@@ -1,6 +1,7 @@
 [features]
 strict = []
 default = []
+enable_tracing = ["rlst/enable_tracing", "dep:log"]
 
 [package]
 name = "bempp"
@@ -44,12 +45,14 @@ kifmm = { git = "https://github.com/bempp/kifmm.git", features = ["mpi"] }
 bempp-distributed-tools = { git = "https://github.com/bempp/distributed_tools.git"}
 rand = "0.8"
 rand_chacha = "0.3"
+log = { version = "0.4", optional = true}
 
 [dev-dependencies]
 approx = "0.5"
 cauchy = "0.4.*"
 criterion = { version = "0.5.*", features = ["html_reports"] }
 # kifmm = { version = "1.0" }
+env_logger = "0.11"
 
 [build-dependencies]
 cbindgen = "0.27.0"

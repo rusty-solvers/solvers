@@ -27,8 +27,9 @@ use ndgrid::traits::{Entity, Grid, Topology};
 use ndgrid::types::Ownership;
 use rayon::prelude::*;
 use rlst::{
-    rlst_dynamic_array2, rlst_dynamic_array4, DefaultIterator, DistributedCsrMatrix, DynamicArray,
-    MatrixInverse, RandomAccessMut, RawAccess, RawAccessMut, RlstScalar, Shape,
+    measure_duration, rlst_dynamic_array2, rlst_dynamic_array4, DefaultIterator,
+    DistributedCsrMatrix, DynamicArray, MatrixInverse, RandomAccessMut, RawAccess, RawAccessMut,
+    RlstScalar, Shape,
 };
 use std::collections::HashMap;
 
@@ -142,6 +143,7 @@ impl<'o, T: RlstScalar + MatrixInverse, Integrand: BoundaryIntegrand<T = T>, K: 
     BoundaryAssembler<'o, T, Integrand, K>
 {
     /// Assemble the singular part into a CSR matrix.
+    #[measure_duration(id = "assemble_singular")]
     pub fn assemble_singular<'a, C: Communicator, Space: FunctionSpaceTrait<T = T, C = C>>(
         &self,
         trial_space: &'a Space,

@@ -24,6 +24,7 @@ use kifmm::{
 use mpi::traits::{Communicator, Equivalence};
 use num::Float;
 use rlst::{
+    measure_duration,
     operator::{interface::DistributedArrayVectorSpace, Operator},
     rlst_dynamic_array1, AsApply, Element, IndexLayout, MatrixSvd, OperatorBase, RawAccess,
     RawAccessMut, RlstScalar,
@@ -73,6 +74,7 @@ where
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: SourceToTargetTranslationMetadata,
 {
     /// Instantiate a new KiFmm Evaluator.
+    #[measure_duration(id = "kifmm_new")]
     pub fn new(
         sources: &[T::Real],
         targets: &[T::Real],
@@ -217,6 +219,7 @@ where
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: DataAccessMulti<Scalar = T>,
     KiFmmMulti<T, Laplace3dKernel<T>, FftFieldTranslation<T>>: GhostExchange,
 {
+    #[measure_duration(id = "kifmm_apply_extended")]
     fn apply_extended<
         ContainerIn: rlst::ElementContainer<E = <Self::Domain as rlst::LinearSpace>::E>,
         ContainerOut: rlst::ElementContainerMut<E = <Self::Range as rlst::LinearSpace>::E>,
